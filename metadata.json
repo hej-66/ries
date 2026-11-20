@@ -1,0 +1,5 @@
+{
+  "name": "RIES 12.0.2 · 定积分与闭式搜索",
+  "description": "RIES 闭式搜索与定积分高精度数值/符号求解整合应用（支持定积分计算、符号验证与闭式候选排序）。",
+  "requestFramePermissions": []
+}

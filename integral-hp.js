@@ -110,8 +110,8 @@
     if (a.gt(0)) {
       var lnA = a.ln();
       var mag = b.mul(lnA);
-      if (mag.gt(20000)) return new D(NaN);
-      if (mag.lt(-20000)) return new D(0);
+      if (mag.gt(1e13)) return new D(Infinity);
+      if (mag.lt(-1e13)) return new D(0);
     }
     return a.pow(b);
   }
@@ -134,7 +134,8 @@
     atan: function (x) { return x.atan(); },
     atan2: function (y, x) { return D.atan2(y, x); },
     sinh: function (x) {
-      if (!x.isFinite() || x.abs().gt(20000)) return new D(NaN);
+      if (!x.isFinite()) return new D(NaN);
+      if (x.abs().gt(1e13)) return new D(x.s < 0 ? -Infinity : Infinity);
       if (x.abs().gt(D.precision * 2 + 20)) {
         var e = x.abs().exp().div(2);
         return x.s < 0 ? e.neg() : e;
@@ -142,7 +143,8 @@
       return x.sinh();
     },
     cosh: function (x) {
-      if (!x.isFinite() || x.abs().gt(20000)) return new D(NaN);
+      if (!x.isFinite()) return new D(NaN);
+      if (x.abs().gt(1e13)) return new D(Infinity);
       if (x.abs().gt(D.precision * 2 + 20)) return x.abs().exp().div(2);
       return x.cosh();
     },
@@ -156,8 +158,8 @@
     atanh: function (x) { return x.atanh(); },
     exp: function (x) {
       if (x.isNaN()) return new D(NaN);
-      if (x.lt(-20000)) return new D(0);
-      if (x.gt(20000)) return new D(NaN);
+      if (x.lt(-1e13)) return new D(0);
+      if (x.gt(1e13)) return new D(Infinity);
       return x.exp();
     },
     ln: function (x) { return x.ln(); },
@@ -282,19 +284,238 @@
     try { return g(x); } catch (e) { return new D(NaN); }
   }
 
-  /* ---------- 互补距离 tanh-sinh（有限区间，节点复用 + 独立双端停止） ---------- */
+  /* ---------- Split-Decimal (base + delta) 精确端点消去编译器 ----------
+     在端点 x = anchor + off（off 极小如 1e-600）求值时，把每个中间量表示为
+     { b, d }（语义为 b + d），从而 1 - (1, -off) = (0, +off) 零有效位损失，
+     无须把 Decimal 工作精度拉高到 300+ 位即可高精度处理任意强端点奇点。 */
+  function compileSplitDec(src) {
+    var ts = insertImplicit(tokenize(src)), pos = 0;
+    var ZERO = new D(0), TWO = new D(2);
+    function peek() { return ts[pos]; }
+    function eat(t) { var k = ts[pos]; if (!k || k.t !== t) throw new Error('表达式语法错误'); pos++; return k; }
+
+    function sdAdd(L, R) { return { b: L.b.plus(R.b), d: L.d.plus(R.d) }; }
+    function sdSub(L, R) { return { b: L.b.minus(R.b), d: L.d.minus(R.d) }; }
+    function sdMul(L, R) {
+      return {
+        b: L.b.mul(R.b),
+        d: L.b.mul(R.d).plus(L.d.mul(R.b)).plus(L.d.mul(R.d))
+      };
+    }
+    function sdDiv(L, R) {
+      if (!R.b.isFinite() || !R.d.isFinite()) return { b: ZERO, d: L.b.plus(L.d).div(R.b.plus(R.d)) };
+      if (R.b.isZero()) return { b: ZERO, d: L.b.plus(L.d).div(R.d) };
+      if (R.d.isZero()) return { b: L.b.div(R.b), d: L.d.div(R.b) };
+      if (L.b.isZero()) return { b: ZERO, d: L.d.div(R.b.plus(R.d)) };
+      var q = L.b.div(R.b);
+      var den = R.b.plus(R.d);
+      if (den.isZero()) return { b: ZERO, d: new D(NaN) };
+      return { b: q, d: L.d.minus(q.mul(R.d)).div(den) };
+    }
+    function sdPow(L, R) {
+      var eVal = R.b.plus(R.d);
+      if (L.b.isZero()) return { b: ZERO, d: safePow(L.d, eVal) };
+      if (L.d.isZero() && R.d.isZero()) return { b: safePow(L.b, eVal), d: ZERO };
+      if (R.d.isZero() && eVal.isInteger()) {
+        if (eVal.eq(2)) return sdMul(L, L);
+        if (eVal.eq(3)) return sdMul(sdMul(L, L), L);
+      }
+      var baseP = safePow(L.b, eVal);
+      if (!baseP.isFinite()) return { b: ZERO, d: safePow(L.b.plus(L.d), eVal) };
+      var fullP = safePow(L.b.plus(L.d), eVal);
+      if (fullP.eq(baseP) && !L.d.isZero() && !L.b.isZero() && R.d.isZero()) {
+        return { b: baseP, d: baseP.mul(eVal).mul(L.d).div(L.b) };
+      }
+      return { b: baseP, d: fullP.minus(baseP) };
+    }
+    var ONE = new D(1), HALF = new D('0.5'), SMALL_TH = new D('0.05');
+    function expm1Taylor(d) {
+      var term = d, sum = d, tol = d.abs().mul(new D(10).pow(-(D.precision + 4)));
+      for (var k = 2; k <= 80; k++) {
+        term = term.mul(d).div(k);
+        sum = sum.plus(term);
+        if (term.abs().lte(tol)) break;
+      }
+      return sum;
+    }
+    function cosm1Taylor(d) {
+      var d2 = d.mul(d), term = d2.neg().div(TWO), sum = term;
+      var tol = term.abs().mul(new D(10).pow(-(D.precision + 4)));
+      for (var k = 4; k <= 80; k += 2) {
+        term = term.mul(d2).neg().div((k - 1) * k);
+        sum = sum.plus(term);
+        if (term.abs().lte(tol)) break;
+      }
+      return sum;
+    }
+    function log1pTaylor(d) {
+      var p = d, sum = d, tol = d.abs().mul(new D(10).pow(-(D.precision + 4)));
+      for (var k = 2; k <= 120; k++) {
+        p = p.mul(d).neg();
+        var term = p.div(k);
+        sum = sum.plus(term);
+        if (term.abs().lte(tol)) break;
+      }
+      return sum;
+    }
+    function sdCall1(name, fn, A) {
+      if (A.b.isZero()) {
+        if (!A.d.isZero() && A.d.isFinite() && A.d.abs().lt(SMALL_TH)) {
+          if (name === 'exp') return { b: ONE, d: expm1Taylor(A.d) };
+          if (name === 'cos') return { b: ONE, d: cosm1Taylor(A.d) };
+        }
+        return { b: ZERO, d: fn(A.d) };
+      }
+      if (A.d.isZero()) return { b: fn(A.b), d: ZERO };
+      if ((name === 'ln' || name === 'log') && A.b.eq(ONE) && A.d.isFinite() && A.d.abs().lt(SMALL_TH)) {
+        return { b: ZERO, d: log1pTaylor(A.d) };
+      }
+      if ((name === 'floor' || name === 'ceil' || name === 'round' || name === 'sign') &&
+          A.b.isFinite() && A.d.isFinite()) {
+        if (name === 'sign') {
+          if (A.b.isZero()) return { b: new D(A.d.s), d: ZERO };
+          if (A.d.abs().lt(A.b.abs())) return { b: new D(A.b.s), d: ZERO };
+        } else if (A.b.isInteger() && A.d.abs().lt(ONE)) {
+          if (name === 'floor') return { b: A.d.s < 0 ? A.b.minus(ONE) : A.b, d: ZERO };
+          if (name === 'ceil') return { b: A.d.s > 0 ? A.b.plus(ONE) : A.b, d: ZERO };
+          if (name === 'round' && A.d.abs().lt(HALF)) return { b: A.b, d: ZERO };
+        }
+      }
+      var vBase = fn(A.b);
+      if (!vBase.isFinite()) return { b: ZERO, d: fn(A.b.plus(A.d)) };
+      var vFull = fn(A.b.plus(A.d));
+      if (vFull.eq(vBase)) {
+        if (name === 'sin') return { b: vBase, d: DFUNCS.cos(A.b).mul(A.d).minus(HALF.mul(vBase).mul(A.d).mul(A.d)) };
+        if (name === 'cos') return { b: vBase, d: DFUNCS.sin(A.b).neg().mul(A.d).minus(HALF.mul(vBase).mul(A.d).mul(A.d)) };
+        if (name === 'exp') return { b: vBase, d: vBase.mul(A.d) };
+        if (name === 'ln' || name === 'log') return { b: vBase, d: A.d.div(A.b) };
+        if (name === 'sqrt' && !vBase.isZero()) return { b: vBase, d: A.d.div(vBase.mul(TWO)) };
+      }
+      return { b: vBase, d: vFull.minus(vBase) };
+    }
+
+    function atom() {
+      var k = peek();
+      if (!k) throw new Error('表达式意外结束');
+      if (k.t === 'num') { pos++; var lit = k.v; return function () { return { b: new D(lit), d: ZERO }; }; }
+      if (k.t === 'id') {
+        pos++;
+        var name = k.v.toLowerCase();
+        if (name === 'x') return function (anc, off) { return { b: anc, d: off }; };
+        if (Object.prototype.hasOwnProperty.call(DCONSTS, name)) {
+          var cfn = DCONSTS[name];
+          return function () { return { b: cfn(), d: ZERO }; };
+        }
+        if (peek() && peek().t === 'lp') {
+          pos++;
+          var args = [];
+          if (!(peek() && peek().t === 'rp')) {
+            args.push(expr());
+            while (peek() && peek().t === 'comma') { pos++; args.push(expr()); }
+          }
+          eat('rp');
+          var fn = DFUNCS[name];
+          if (!fn) throw new Error('未知函数「' + name + '」');
+          var A = args.slice();
+          if (A.length === 1) {
+            var a0 = A[0];
+            return function (anc, off) { return sdCall1(name, fn, a0(anc, off)); };
+          }
+          if (name === 'pow' && A.length === 2) {
+            return function (anc, off) { return sdPow(A[0](anc, off), A[1](anc, off)); };
+          }
+          return function (anc, off) {
+            var vs = A.map(function (f) { var r = f(anc, off); return r.b.plus(r.d); });
+            return { b: ZERO, d: fn.apply(null, vs) };
+          };
+        }
+        throw new Error('未知标识符「' + name + '」');
+      }
+      if (k.t === 'lp') {
+        pos++;
+        var inner = expr();
+        eat('rp');
+        return inner;
+      }
+      if (k.t === 'op' && (k.v === '-' || k.v === '+')) {
+        pos++;
+        var u = unary();
+        return k.v === '-' ? function (anc, off) { var r = u(anc, off); return { b: r.b.neg(), d: r.d.neg() }; } : u;
+      }
+      throw new Error('表达式语法错误');
+    }
+
+    function power() {
+      var base = atom();
+      if (peek() && peek().t === 'op' && peek().v === '^') {
+        pos++;
+        var ex = unary();
+        return function (anc, off) { return sdPow(base(anc, off), ex(anc, off)); };
+      }
+      return base;
+    }
+
+    function unary() {
+      var k = peek();
+      if (k && k.t === 'op' && (k.v === '-' || k.v === '+')) {
+        pos++;
+        var u = unary();
+        return k.v === '-' ? function (anc, off) { var r = u(anc, off); return { b: r.b.neg(), d: r.d.neg() }; } : u;
+      }
+      return power();
+    }
+
+    function binop(op, L, R) {
+      if (op === '*') return function (anc, off) { return sdMul(L(anc, off), R(anc, off)); };
+      if (op === '/') return function (anc, off) { return sdDiv(L(anc, off), R(anc, off)); };
+      if (op === '+') return function (anc, off) { return sdAdd(L(anc, off), R(anc, off)); };
+      return function (anc, off) { return sdSub(L(anc, off), R(anc, off)); };
+    }
+
+    function term() {
+      var left = unary();
+      while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
+        left = binop(ts[pos++].v, left, unary());
+      }
+      return left;
+    }
+
+    function expr() {
+      var left = term();
+      while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+        left = binop(ts[pos++].v, left, term());
+      }
+      return left;
+    }
+
+    var fn = expr();
+    if (pos !== ts.length) throw new Error('表达式语法错误');
+    return fn;
+  }
+
+  function evalSplitDec(gSplit, anchor, off) {
+    try {
+      var r = gSplit(anchor, off);
+      return r.b.plus(r.d);
+    } catch (e) { return new D(NaN); }
+  }
+
+  /* ---------- 互补距离 tanh-sinh（有限区间，Split-Decimal 零端点消去 + 独立双翼停止） ---------- */
   function tanhSinh(g, a, b, opt) {
     var o = opt || {};
     var targetDigits = o.digits || 26;
     var maxLevel = o.maxLevel || 6;
     var maxMs = o.maxMs || 2500;
+    var gSplit = o.gSplit || null;
     var deadline = Date.now() + maxMs;
     var stopDiff = new D(10).pow(-(targetDigits + 2));
     var c = a.plus(b).div(2), d = b.minus(a).div(2);
     var PI = decPI(), HP = PI.div(2);
     var one = new D(1), two = new D(2);
     var expFull = new D(10).pow(D.precision + 5);
-    var tailTol = new D(10).pow(-(Math.max(12, D.precision - 5)));
+    var expAsymp = D.precision * 3 + 25;
+    /* tailTol 绑定目标位数而非 D.precision，防止 0/0 抵消类在极深端点处精度耗尽爆噪 */
+    var tailTol = new D(10).pow(-(targetDigits + 7));
     var nearA = D.max(a.abs(), one).mul(new D(10).pow(-(Math.max(10, D.precision - 3))));
     var nearB = D.max(b.abs(), one).mul(new D(10).pow(-(Math.max(10, D.precision - 3))));
 
@@ -310,12 +531,15 @@
     rawSum = w0;
     absRawSum = w0.abs();
 
+    var noiseCut = new D(10).pow(-(Math.max(12, Math.floor(D.precision / 2) - 5)));
     for (var L = 1; L <= maxLevel; L++) {
       var h = two.pow(-L);
       var step = L === 1 ? 1 : 2;
       var aborted = false;
       var doneL = false, doneR = false;
-      var smallCount = 0;
+      var smallL = 0, smallR = 0;
+      var lastVR = null, prevLastVR = null, prevAR = null;
+      var lastVL = null, prevLastVL = null, prevAL = null;
 
       for (var k = 1; k < 400000; k += step) {
         if ((k & 31) === 1 && Date.now() > deadline) { aborted = true; break; }
@@ -324,59 +548,96 @@
         var sh = t.sinh(), ch = t.cosh();
         var u = HP.mul(sh);
         var u2 = u.mul(2);
-        if (u2.gt(19000)) break;
+        if (u2.gt(1e12)) break;
 
-        var e2u = u2.exp();
-        var delta = two.div(e2u.plus(one));
+        var delta, frac;
+        if (u2.gt(expAsymp)) {
+          delta = two.mul(u2.neg().exp());
+          frac = one;
+        } else {
+          var e2u = u2.exp();
+          delta = two.div(e2u.plus(one));
+          frac = e2u.gt(expFull) ? one : e2u.div(e2u.plus(one));
+        }
         var off = d.mul(delta);
-        var frac = e2u.gt(expFull) ? one : e2u.div(e2u.plus(one));
+        if (off.isZero()) break;
         var w = PI.mul(ch).mul(delta).mul(frac);
 
-        var xp = b.minus(off), xm = a.plus(off);
-        if (!doneR && xp.gte(b)) doneR = true;
-        if (!doneL && xm.lte(a)) doneL = true;
-        if (doneL && doneR) break;
+        var xp = null, xm = null;
+        if (!gSplit) {
+          xp = b.minus(off);
+          xm = a.plus(off);
+          if (!doneR && xp.gte(b)) doneR = true;
+          if (!doneL && xm.lte(a)) doneL = true;
+          if (doneL && doneR) break;
+        }
 
-        var termMag = new D(0);
         if (!doneR) {
-          var v1 = evalDec(g, xp);
+          var v1 = gSplit ? evalSplitDec(gSplit, b, off.neg()) : evalDec(g, xp);
           totalEvals++;
           if (!v1.isFinite()) {
             if (off.lte(nearB) && k > 3) doneR = true;
             else { aborted = true; break; }
           } else {
-            var t1 = w.mul(v1);
-            if (!t1.isFinite()) { aborted = true; break; }
-            rawSum = rawSum.plus(t1);
-            var a1 = t1.abs();
-            absRawSum = absRawSum.plus(a1);
-            termMag = termMag.plus(a1);
+            var v1Abs = v1.abs();
+            /* 仅当此前函数幅值有界（非奇点增长）且上一项已衰减至 tailTol 量级，却在极深处突现 1e10 倍爆噪，才判为 0/0 舍入尖刺 */
+            if (tNum >= 2.5 && off.lt(noiseCut) && lastVR && prevLastVR && prevAR && !absRawSum.isZero() &&
+                lastVR.lte(prevLastVR.mul(two).plus(one)) &&
+                prevAR.lte(absRawSum.mul(tailTol).mul('1e4')) &&
+                v1Abs.gt(lastVR.plus(one).mul('1e10'))) {
+              doneR = true;
+            } else {
+              var t1 = w.mul(v1);
+              if (!t1.isFinite()) { aborted = true; break; }
+              rawSum = rawSum.plus(t1);
+              var a1 = t1.abs();
+              absRawSum = absRawSum.plus(a1);
+              prevLastVR = lastVR; lastVR = v1Abs; prevAR = a1;
+              if (tNum >= 1.5) {
+                if (a1.isZero() && tNum >= 2.5) {
+                  if (++smallR >= 2) doneR = true;
+                } else if (!absRawSum.isZero() && a1.lte(absRawSum.mul(tailTol))) {
+                  if (++smallR >= 3) doneR = true;
+                } else {
+                  smallR = 0;
+                }
+              }
+            }
           }
         }
         if (!doneL) {
-          var v2 = evalDec(g, xm);
+          var v2 = gSplit ? evalSplitDec(gSplit, a, off) : evalDec(g, xm);
           totalEvals++;
           if (!v2.isFinite()) {
             if (off.lte(nearA) && k > 3) doneL = true;
             else { aborted = true; break; }
           } else {
-            var t2 = w.mul(v2);
-            if (!t2.isFinite()) { aborted = true; break; }
-            rawSum = rawSum.plus(t2);
-            var a2 = t2.abs();
-            absRawSum = absRawSum.plus(a2);
-            termMag = termMag.plus(a2);
+            var v2Abs = v2.abs();
+            if (tNum >= 2.5 && off.lt(noiseCut) && lastVL && prevLastVL && prevAL && !absRawSum.isZero() &&
+                lastVL.lte(prevLastVL.mul(two).plus(one)) &&
+                prevAL.lte(absRawSum.mul(tailTol).mul('1e4')) &&
+                v2Abs.gt(lastVL.plus(one).mul('1e10'))) {
+              doneL = true;
+            } else {
+              var t2 = w.mul(v2);
+              if (!t2.isFinite()) { aborted = true; break; }
+              rawSum = rawSum.plus(t2);
+              var a2 = t2.abs();
+              absRawSum = absRawSum.plus(a2);
+              prevLastVL = lastVL; lastVL = v2Abs; prevAL = a2;
+              if (tNum >= 1.5) {
+                if (a2.isZero() && tNum >= 2.5) {
+                  if (++smallL >= 2) doneL = true;
+                } else if (!absRawSum.isZero() && a2.lte(absRawSum.mul(tailTol))) {
+                  if (++smallL >= 3) doneL = true;
+                } else {
+                  smallL = 0;
+                }
+              }
+            }
           }
         }
         if (doneL && doneR) break;
-
-        if (tNum >= 1.5 && !absRawSum.isZero()) {
-          if (termMag.lte(absRawSum.mul(tailTol))) {
-            if (++smallCount >= 3) break;
-          } else {
-            smallCount = 0;
-          }
-        }
       }
 
       var v = rawSum.mul(h).mul(d);
@@ -471,12 +732,13 @@
     var targetDigits = o.digits || 26;
     var maxLevel = o.maxLevel || 6;
     var maxMs = o.maxMs || 2500;
+    var gSplit = o.gSplit || null;
     var deadline = Date.now() + maxMs;
     var stopDiff = new D(10).pow(-(targetDigits + 2));
     var PI = decPI(), HP = PI.div(2);
     var two = new D(2), one = new D(1);
     var dirDec = new D(dir);
-    var tailTol = new D(10).pow(-(Math.max(12, D.precision - 5)));
+    var tailTol = new D(10).pow(-(targetDigits + 7));
     var nearA = D.max(aDec.abs(), one).mul(new D(10).pow(-(Math.max(10, D.precision / 2))));
     var cutDec = cutDist !== null ? new D(cutDist) : null;
     var cutLogLim = cutDist !== null ? Math.log(cutDist) + 4 : null;
@@ -512,7 +774,7 @@
         if (!donePos) {
           if (cutLogLim !== null && u.gt(cutLogLim)) {
             donePos = true;
-          } else if (u.gt(2e8)) {
+          } else if (u.gt(1e12)) {
             donePos = true;
           } else {
             var rp = u.exp();
@@ -530,7 +792,7 @@
               rawSum = rawSum.plus(tp);
               var ap = tp.abs();
               absRawSum = absRawSum.plus(ap);
-              if (u.gt(1e8) && !absRawSum.isZero() && ap.gt(absRawSum.mul(tailTol))) {
+              if (u.gt(1e11) && !absRawSum.isZero() && ap.gt(absRawSum.mul(tailTol))) {
                 tailTrunc = D.max(tailTrunc, tp.abs().mul(two));
               }
               if (tNum >= 1.5 && !absRawSum.isZero()) {
@@ -546,18 +808,18 @@
 
         /* 负翼 -t < 0：走向有限端点 aDec */
         if (!doneNeg) {
-          if (u.gt(20000)) {
+          if (u.gt(1e12)) {
             doneNeg = true;
           } else {
             var rn = u.neg().exp();
             if (rn.isZero()) {
               doneNeg = true;
             } else {
-              var xm = aDec.plus(rn.mul(dirDec));
-              if (!aDec.isZero() && xm.eq(aDec)) {
+              var xm = gSplit ? null : aDec.plus(rn.mul(dirDec));
+              if (!gSplit && !aDec.isZero() && xm.eq(aDec)) {
                 doneNeg = true;
               } else {
-                var vm = evalDec(gDec, xm);
+                var vm = gSplit ? evalSplitDec(gSplit, aDec, rn.mul(dirDec)) : evalDec(gDec, xm);
                 totalEvals++;
                 if (!vm.isFinite()) {
                   if (rn.lte(nearA) && k > 2) doneNeg = true;
@@ -612,7 +874,7 @@
     var stopDiff = new D(10).pow(-(targetDigits + 2));
     var PI = decPI(), HP = PI.div(2);
     var two = new D(2), one = new D(1);
-    var tailTol = new D(10).pow(-(Math.max(12, D.precision - 5)));
+    var tailTol = new D(10).pow(-(targetDigits + 7));
     var cutPDec = cutPos !== null ? new D(cutPos) : null;
     var cutNDec = cutNeg !== null ? new D(cutNeg) : null;
     var cutPLog = cutPos !== null ? Math.log(cutPos) + 4 : null;
@@ -643,7 +905,7 @@
         var tNum = t.toNumber();
         var sh = t.sinh(), ch = t.cosh();
         var u = HP.mul(sh);
-        if (u.gt(2e8)) break;
+        if (u.gt(1e12)) break;
 
         if (cutPLog !== null && u.gt(cutPLog)) donePos = true;
         if (cutNLog !== null && u.gt(cutNLog)) doneNeg = true;
@@ -734,15 +996,8 @@
     var maxLevel = o.maxLevel || 6;
     var oldPrec = D.precision;
 
-    /* 有限区间非零端点有强奇点时，提高工作精度以免端点处被拉平前精度耗尽 */
-    var workPrec = targetDigits + 30;
-    var sLo = o.singularitySlopeLo, sHi = o.singularitySlopeHi;
-    if (typeof sLo === 'number' && sLo < -0.55 && sLo > -0.995) {
-      workPrec = Math.max(workPrec, Math.min(320, Math.ceil(targetDigits / (1 + sLo)) + 35));
-    }
-    if (typeof sHi === 'number' && sHi < -0.55 && sHi > -0.995) {
-      workPrec = Math.max(workPrec, Math.min(320, Math.ceil(targetDigits / (1 + sHi)) + 35));
-    }
+    /* Split-Decimal 已彻底消除端点 1−x 与 (e^x-1-x)/x² 抵消；多分段场景允许 fastPrec 降低工作精度提速 */
+    var workPrec = o.fastPrec ? Math.max(targetDigits + 18, 38) : Math.max(targetDigits + 52, 82);
 
     D.set({ precision: workPrec });
     try {
@@ -750,27 +1005,30 @@
       if (!(B.num > A.num)) return null;
       var a = A.num, b = B.num;
 
-      var gDec;
+      var gDec, gSplit = null;
       try { gDec = compileDec(fNum.src); } catch (e) { return null; }
+      try { gSplit = compileSplitDec(fNum.src); } catch (e) { gSplit = null; }
 
       var res = null, label = '';
       var tailBound = null;
 
       if (isFinite(a) && isFinite(b)) {
         label = '有限区间互补 tanh-sinh';
-        res = tanhSinh(gDec, A.dec, B.dec, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 2500 });
+        /* 有限区间允许在未收敛且预算充足时走 L=7（如极窄高斯峰 exp(-1e6(x-0.3)²)） */
+        var finMaxLv = o.maxLevel ? Math.max(maxLevel, o.fastPrec ? maxLevel : 7) : 7;
+        res = tanhSinh(gDec, A.dec, B.dec, { digits: targetDigits, maxLevel: finMaxLv, maxMs: o.maxMs || 2500, gSplit: gSplit });
       } else if (isFinite(a) && b === Infinity) {
         label = 'exp-sinh（[a, ∞)）';
         var pR = probeInfiniteTail(fNum, a, 1);
         if (pR.divergentOverflow) return null;
         tailBound = pR.cutoff;
-        res = expSinh(gDec, A.dec, 1, pR.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 2500 });
+        res = expSinh(gDec, A.dec, 1, pR.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 2500, gSplit: gSplit });
       } else if (a === -Infinity && isFinite(b)) {
         label = 'exp-sinh（(−∞, b]）';
         var pL = probeInfiniteTail(fNum, b, -1);
         if (pL.divergentOverflow) return null;
         tailBound = pL.cutoff;
-        res = expSinh(gDec, B.dec, -1, pL.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 2500 });
+        res = expSinh(gDec, B.dec, -1, pL.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 2500, gSplit: gSplit });
       } else if (a === -Infinity && b === Infinity) {
         label = 'sinh-sinh（(−∞, ∞)）';
         var pPos = probeInfiniteTail(fNum, 0, 1);
@@ -782,8 +1040,8 @@
         if (!gZero.isFinite()) {
           var gP = evalDec(gDec, new D('0.01')), gM = evalDec(gDec, new D('-0.01'));
           if (!gP.isFinite() || !gM.isFinite()) return null;
-          var rPos = expSinh(gDec, new D(0), 1, pPos.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 1800 });
-          var rNeg = expSinh(gDec, new D(0), -1, pNeg.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 1800 });
+          var rPos = expSinh(gDec, new D(0), 1, pPos.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 1800, gSplit: gSplit });
+          var rNeg = expSinh(gDec, new D(0), -1, pNeg.cutoff, { digits: targetDigits, maxLevel: maxLevel, maxMs: o.maxMs || 1800, gSplit: gSplit });
           if (!rPos || !rPos.value || !rPos.value.isFinite() || rPos.aborted ||
               !rNeg || !rNeg.value || !rNeg.value.isFinite() || rNeg.aborted) return null;
           var sumV = rPos.value.plus(rNeg.value);
@@ -1422,6 +1680,7 @@
     for (var i = 0; i < n; i++) prev2[i] = new D(0);
 
     var evenLast = [sums[n - 1]];
+    var evenHoriz = [new D(Infinity)];
     var tiny = new D('1e-550');
     for (var k = 0; k < n - 1; k++) {
       var len = n - 1 - k, cur = new Array(len);
@@ -1439,13 +1698,18 @@
       if (!anyFinite) break;
       if ((k + 1) % 2 === 0 && cur[len - 1] && cur[len - 1].isFinite()) {
         evenLast.push(cur[len - 1]);
+        var hErr = (len >= 2 && cur[len - 2] && cur[len - 2].isFinite())
+          ? cur[len - 1].minus(cur[len - 2]).abs() : new D(Infinity);
+        evenHoriz.push(hErr);
       }
     }
     if (evenLast.length < 2) return { value: sums[n - 1], err: new D(Infinity) };
     var bestVal = evenLast[evenLast.length - 1];
     var bestDiff = evenLast[evenLast.length - 1].minus(evenLast[evenLast.length - 2]).abs();
+    if (evenHoriz[evenLast.length - 1].lt(bestDiff)) bestDiff = evenHoriz[evenLast.length - 1];
     for (var m = 1; m < evenLast.length; m++) {
       var df = evenLast[m].minus(evenLast[m - 1]).abs();
+      if (evenHoriz[m].lt(df)) df = evenHoriz[m];
       if (df.lte(bestDiff)) {
         bestDiff = df;
         bestVal = evenLast[m];
@@ -1499,9 +1763,16 @@
       else return null;
 
       var fDec = compileDec(fNum.src);
+      var fSplitRaw = null;
+      try { fSplitRaw = compileSplitDec(fNum.src); } catch (e) { fSplitRaw = null; }
       var gDec = dir === 1
         ? function (r) { return fDec(anchorDec.plus(r)); }
         : function (r) { return fDec(anchorDec.minus(r)); };
+      var gSplitR = fSplitRaw
+        ? (dir === 1
+            ? function (anc, off) { return fSplitRaw(anchorDec.plus(anc), off); }
+            : function (anc, off) { return fSplitRaw(anchorDec.minus(anc), off.neg()); })
+        : null;
       var startR = new D(0);
 
       /* zerosApprox 是 x 域零点，转成 r = dir*(z - anchor) */
@@ -1513,8 +1784,8 @@
       }
       if (rsApprox.length < 46) return null;
 
-      var zTol = new D(10).pow(-(digits + 18));
-      var needZeros = Math.min(rsApprox.length, 48);
+      var zTol = new D(10).pow(-(digits + 14));
+      var needZeros = Math.min(rsApprox.length, 46);
       var rZeros = [];
       for (var k = 0; k < needZeros; k++) {
         var prevGap = k === 0 ? rsApprox[0] : (rsApprox[k] - rsApprox[k - 1]);
@@ -1529,7 +1800,7 @@
       /* 首段 [0, z_0] 用 tanhSinh */
       var initVal = new D(0), initEvals = 0, initDiff = new D(0);
       if (startR.lt(rZeros[0])) {
-        var r0 = tanhSinh(gDec, startR, rZeros[0], { digits: digits + 2, maxLevel: 8, maxMs: 1800 });
+        var r0 = tanhSinh(gDec, startR, rZeros[0], { digits: digits + 2, maxLevel: 7, maxMs: 1400, gSplit: gSplitR });
         if (!r0 || !r0.value || !r0.value.isFinite() || r0.aborted) return null;
         if (!r0.converged) {
           var r0Diff = r0.prev ? r0.value.minus(r0.prev).abs() : new D(Infinity);
@@ -1539,17 +1810,18 @@
         if (r0.prev) initDiff = r0.value.minus(r0.prev).abs();
       }
 
-      var rule32 = glStdRule(32), rule16 = glStdRule(16);
-      var panelTol = new D(10).pow(-(digits + 8));
+      /* 用 GL32 vs GL24 检验（避免 sin³x/x³ 等高次谐波被 GL16 误判而整排细分） */
+      var rule32 = glStdRule(32), rule24 = glStdRule(24);
+      var panelTol = new D(10).pow(-(digits + 6));
       var counter = { n: 0 };
       var panels = [], nPanels = Math.min(44, rZeros.length - 1);
       var needAdaptiveAll = false;
       for (var m = 0; m < nPanels; m++) {
         var pv;
-        if (needAdaptiveAll || m < 4 || (m % 8 === 0)) {
+        if (needAdaptiveAll || m < 2 || (m % 8 === 0)) {
           var before = counter.n;
-          pv = glIntegrateAdaptive(gDec, rZeros[m], rZeros[m + 1], panelTol, 0, rule32, rule16, counter);
-          if (counter.n - before > rule32.n + rule16.n) needAdaptiveAll = true;
+          pv = glIntegrateAdaptive(gDec, rZeros[m], rZeros[m + 1], panelTol, 0, rule32, rule24, counter);
+          if (m >= 4 && counter.n - before > rule32.n + rule24.n) needAdaptiveAll = true;
         } else {
           pv = glIntegratePanel(gDec, rZeros[m], rZeros[m + 1], rule32);
           counter.n += rule32.n;
@@ -1558,7 +1830,7 @@
         panels.push(pv);
       }
 
-      /* 跳过前几片直到进入严格交替且绝对值衰减段（最多跳 4 片） */
+      /* 跳过前几片直到进入严格交替段（最多跳 4 片） */
       var skip = 0;
       while (skip + 36 < panels.length) {
         var okTail = true;
@@ -1569,7 +1841,7 @@
         skip++;
       }
       var tailPanels = panels.slice(skip);
-      if (tailPanels.length < 36) return null;
+      if (tailPanels.length < 34) return null;
       for (var j2 = 1; j2 < tailPanels.length; j2++) {
         if (tailPanels[j2].mul(tailPanels[j2 - 1]).gte(0)) return null;
       }
@@ -1577,14 +1849,14 @@
       var preSum = initVal;
       for (var sIdx = 0; sIdx < skip; sIdx++) preSum = preSum.plus(panels[sIdx]);
 
-      /* 判断是否单调递减，尝试 CVZ 与对角 Wynn */
+      /* 判断是否单调递减，尝试 CVZ、对角 Wynn 以及配对周期 Levin-u（支持带非零均值振荡如 (sin u + c)/u²） */
       var mags = tailPanels.map(function (v) { return v.abs(); });
       var mono = true;
       for (var mm = 1; mm < mags.length; mm++) {
         if (!mags[mm].lt(mags[mm - 1])) { mono = false; break; }
       }
 
-      var n1 = Math.min(36, tailPanels.length - 6);
+      var n1 = Math.min(34, tailPanels.length - 6);
       var n2 = tailPanels.length;
       if (n1 < 20) return null;
 
@@ -1614,9 +1886,60 @@
         bestMethod = 'Decimal Wynn-ε';
       }
 
+      if (!mono && tailPanels.length >= 30) {
+        /* 若非单调交替（例如带非零偏置的 (sin u + c)/u²），追加面板至 58 片（29 对）以提升 Levin-u 至 22+ 位 */
+        var extraTarget = Math.min(58, rsApprox.length - 1);
+        if (extraTarget > nPanels) {
+          for (var kx = needZeros; kx <= extraTarget; kx++) {
+            var pgX = rsApprox[kx] - rsApprox[kx - 1];
+            var ngX = kx + 1 < rsApprox.length ? (rsApprox[kx + 1] - rsApprox[kx]) : pgX;
+            var mhX = Math.min(Math.min(pgX, ngX) * 0.25, Math.max(1e-9 * (1 + rsApprox[kx]), 1e-10));
+            var rzX = refineZeroDec(gDec, rsApprox[kx], mhX, zTol);
+            if (!rzX || !rzX.gt(rZeros[rZeros.length - 1])) break;
+            rZeros.push(rzX);
+          }
+          for (var mx = nPanels; mx + 1 < rZeros.length; mx++) {
+            var pvX = glIntegratePanel(gDec, rZeros[mx], rZeros[mx + 1], rule24);
+            counter.n += rule24.n;
+            if (!pvX.isFinite()) break;
+            panels.push(pvX);
+          }
+          nPanels = panels.length;
+          tailPanels = panels.slice(skip);
+        }
+        var nPairs = Math.floor(tailPanels.length / 2);
+        var paired = [];
+        for (var pk = 0; pk < nPairs; pk++) {
+          paired.push(tailPanels[2 * pk].plus(tailPanels[2 * pk + 1]));
+        }
+        var pSign = paired[paired.length - 1].s;
+        var sameP = pSign !== 0;
+        for (var pi2 = 2; pi2 < paired.length; pi2++) {
+          if (paired[pi2].isZero() || paired[pi2].s !== pSign) { sameP = false; break; }
+        }
+        if (sameP && paired.length >= 16) {
+          var pPre = preSum.plus(paired[0]).plus(paired[1]);
+          var pAbs = paired.slice(2).map(function (v) { return v.abs(); });
+          var pOrd2 = pAbs.length - 1;
+          var pOrd1 = Math.max(10, pOrd2 - 4);
+          var pl1 = levinU(pAbs, 0, pOrd1);
+          var pl2 = levinU(pAbs, 0, pOrd2);
+          if (pl1.isFinite() && pl2.isFinite()) {
+            var pGap = pl1.minus(pl2).abs();
+            var pVal = pPre.plus(pSign > 0 ? pl2 : pl2.neg());
+            if (!bestGap || pGap.lt(bestGap)) {
+              bestVal = pVal;
+              bestGap = pGap;
+              bestMethod = '配对周期 Levin-u';
+            }
+          }
+        }
+      }
+
       if (!bestVal || !bestVal.isFinite() || !bestGap) return null;
       var refScale = D.max(bestVal.abs(), initVal.abs(), mags[0], new D('1e-300'));
-      if (bestGap.gt(refScale.mul(new D(10).pow(-(digits - 7))))) return null;
+      var reqTol = bestMethod === '配对周期 Levin-u' ? new D('1e-12') : new D(10).pow(-(digits - 7));
+      if (bestGap.gt(refScale.mul(reqTol))) return null;
 
       var sig = D.max(bestGap.mul(10), initDiff.mul(10), refScale.mul(new D(10).pow(-digits)));
       var dig = Math.min(40, sig.div(refScale).ln().div(new D(10).ln()).neg().toNumber());
@@ -1716,10 +2039,10 @@
 
   function integratePosOsc(fNum, aRaw, bRaw, minimaApprox, opt) {
     var o = opt || {};
-    if (!fNum || !fNum.src || !Array.isArray(minimaApprox) || minimaApprox.length < 28) return null;
+    if (!fNum || !fNum.src || !Array.isArray(minimaApprox) || minimaApprox.length < 26) return null;
     var digits = o.digits || 25;
     var oldPrec = D.precision;
-    D.set({ precision: digits + 40 });
+    D.set({ precision: digits + 18 });
     try {
       var A = parseBoundDec(aRaw), B = parseBoundDec(bRaw);
       var a = A.num, b = B.num;
@@ -1729,20 +2052,27 @@
       else return null;
 
       var fDec = compileDec(fNum.src);
+      var fSplitRaw = null;
+      try { fSplitRaw = compileSplitDec(fNum.src); } catch (e) { fSplitRaw = null; }
       var gDec = dir === 1
         ? function (r) { return fDec(anchorDec.plus(r)); }
         : function (r) { return fDec(anchorDec.minus(r)); };
+      var gSplitR = fSplitRaw
+        ? (dir === 1
+            ? function (anc, off) { return fSplitRaw(anchorDec.plus(anc), off); }
+            : function (anc, off) { return fSplitRaw(anchorDec.minus(anc), off.neg()); })
+        : null;
       var anchorNum = anchorDec.toNumber();
       var rsApprox = [];
       for (var i = 0; i < minimaApprox.length; i++) {
         var r = dir * (minimaApprox[i] - anchorNum);
         if (r > 0) rsApprox.push(r);
       }
-      if (rsApprox.length < 26) return null;
+      if (rsApprox.length < 24) return null;
 
-      var need = Math.min(rsApprox.length, 32);
+      var need = Math.min(rsApprox.length, 24);
       var hDiff = new D(10).pow(-(Math.floor(D.precision / 3)));
-      var tol = new D(10).pow(-(digits + 16));
+      var tol = new D('1e-18');
       var rCuts = [];
       for (var k = 0; k < need; k++) {
         var g1 = k === 0 ? rsApprox[0] : rsApprox[k] - rsApprox[k - 1];
@@ -1756,21 +2086,31 @@
 
       var initVal = new D(0), initEvals = 0, initDiff = new D(0);
       if (rCuts[0].gt(0)) {
-        var r0 = tanhSinh(gDec, new D(0), rCuts[0], { digits: digits + 2, maxLevel: 8, maxMs: 1800 });
+        var r0 = tanhSinh(gDec, new D(0), rCuts[0], { digits: digits + 2, maxLevel: 6, maxMs: 1200, gSplit: gSplitR });
         if (!r0 || !r0.value || !r0.value.isFinite() || r0.aborted || !r0.converged) return null;
         initVal = r0.value; initEvals = r0.evals;
         if (r0.prev) initDiff = r0.value.minus(r0.prev).abs();
       }
 
-      var rule32 = glStdRule(32), rule16 = glStdRule(16);
-      var panelTol = new D(10).pow(-(digits + 6));
+      /* GL32 vs GL24 检验（避免 sin⁴x/x⁴ 被 GL16 误判而整排细分） */
+      var rule32 = glStdRule(32), rule24 = glStdRule(24);
+      var panelTol = new D(10).pow(-(digits + 5));
       var counter = { n: 0 }, panels = [];
+      var needAdaptiveAll = false;
       for (var m = 0; m + 1 < rCuts.length; m++) {
-        var pv = glIntegrateAdaptive(gDec, rCuts[m], rCuts[m + 1], panelTol, 0, rule32, rule16, counter);
+        var pv;
+        if (needAdaptiveAll || m < 2 || m === 12) {
+          var before = counter.n;
+          pv = glIntegrateAdaptive(gDec, rCuts[m], rCuts[m + 1], panelTol, 0, rule32, rule24, counter);
+          if (m >= 4 && counter.n - before > rule32.n + rule24.n) needAdaptiveAll = true;
+        } else {
+          pv = glIntegratePanel(gDec, rCuts[m], rCuts[m + 1], rule32);
+          counter.n += rule32.n;
+        }
         if (!pv.isFinite() || pv.lte(0)) return null;
         panels.push(pv);
       }
-      if (panels.length < 24) return null;
+      if (panels.length < 20) return null;
 
       /* 发散守卫：尾部对数斜率必须 < -1.08 */
       var half = Math.floor(panels.length / 2);
@@ -1824,25 +2164,252 @@
     }
   }
 
-  /* ---------- 精化内部奇点/折点（用于分段高精度求积） ---------- */
+  /* ---------- 慢衰减/对数尾部：Decimal 倍增对数壳分解 + 迭代对数发散证明 ----------
+     支持：
+       1. 半无穷慢尾 [a, ∞) / (-∞, b]：换元 x = a ± e^s，壳 [2^k-1, 2^(k+1)-1]
+       2. 有限端对数慢奇点（x → a+ 或 x → b-）：换元 x = anchor ± W·e^(-s)（Split-Decimal 零消去）
+     若同号壳序列的 Cauchy 凝聚斜率 d(ln|I_k|)/d(ln k) >= -1.06 且非几何衰减 → 证明发散；
+     否则几何衰减走 Decimal Wynn-ε，代数衰减走 Levin u-transform，双长度一致性核验。 */
+  function integrateLogTailDec(fNum, aRaw, bRaw, opt) {
+    var o = opt || {};
+    if (!fNum || !fNum.src) return null;
+    var digits = o.digits || 25;
+    var oldPrec = D.precision;
+    D.set({ precision: digits + 18 });
+    try {
+      var A = parseBoundDec(aRaw), B = parseBoundDec(bRaw);
+      if (!(B.num > A.num)) return null;
+      var a = A.num, b = B.num;
+      var fDec = compileDec(fNum.src);
+      var gSplit = compileSplitDec(fNum.src);
+      var rule24 = glStdRule(24), rule16 = glStdRule(16);
+      var one = new D(1), two = new D(2);
+
+      var mode = null, hFn = null, initVal = new D(0), initDiff = new D(0), initEvals = 0, label = '';
+      if (isFinite(a) && b === Infinity) {
+        mode = 'inf';
+        label = '倍增对数壳 + 外推（[a, ∞)）';
+        var r0 = tanhSinh(fDec, A.dec, A.dec.plus(one), { digits: digits + 2, maxLevel: 5, maxMs: 800, gSplit: gSplit });
+        if (!r0 || !r0.value || !r0.value.isFinite() || r0.aborted) return null;
+        initVal = r0.value; initEvals = r0.evals;
+        if (r0.prev) initDiff = r0.value.minus(r0.prev).abs();
+        hFn = function (s) {
+          var es = s.exp();
+          var v = evalDec(fDec, A.dec.plus(es));
+          return es.mul(v);
+        };
+      } else if (a === -Infinity && isFinite(b)) {
+        mode = 'inf';
+        label = '倍增对数壳 + 外推（(−∞, b]）';
+        var r0L = tanhSinh(fDec, B.dec.minus(one), B.dec, { digits: digits + 2, maxLevel: 5, maxMs: 800, gSplit: gSplit });
+        if (!r0L || !r0L.value || !r0L.value.isFinite() || r0L.aborted) return null;
+        initVal = r0L.value; initEvals = r0L.evals;
+        if (r0L.prev) initDiff = r0L.value.minus(r0L.prev).abs();
+        hFn = function (s) {
+          var es = s.exp();
+          var v = evalDec(fDec, B.dec.minus(es));
+          return es.mul(v);
+        };
+      } else if (isFinite(a) && isFinite(b) && (o.side === 'lo' || o.side === 'hi')) {
+        mode = 'fin';
+        var W = B.dec.minus(A.dec);
+        var anc = o.side === 'lo' ? A.dec : B.dec;
+        var sgn = o.side === 'lo' ? one : one.neg();
+        label = '端点对数壳 + 外推（' + (o.side === 'lo' ? '左端' : '右端') + '）';
+        hFn = function (s) {
+          var ems = s.neg().exp();
+          var off = W.mul(ems);
+          var v = evalSplitDec(gSplit, anc, off.mul(sgn));
+          return off.mul(v);
+        };
+      } else {
+        return null;
+      }
+
+      function checkShellSlope(arr) {
+        var nSh0 = arr.length;
+        var rL = arr[nSh0 - 1].abs().div(arr[nSh0 - 2].abs()).toNumber();
+        var rP = arr[nSh0 - 2].abs().div(arr[nSh0 - 3].abs()).toNumber();
+        var lx0 = [], ly0 = [];
+        for (var li0 = Math.floor(nSh0 / 2); li0 < nSh0; li0++) {
+          var av0 = arr[li0].abs().toNumber();
+          if (!(av0 > 0)) return null;
+          lx0.push(Math.log(li0 + 1));
+          ly0.push(Math.log(av0));
+        }
+        var mx0 = 0, my0 = 0;
+        for (var u10 = 0; u10 < lx0.length; u10++) { mx0 += lx0[u10]; my0 += ly0[u10]; }
+        mx0 /= lx0.length; my0 /= ly0.length;
+        var num0 = 0, den0 = 0;
+        for (var u20 = 0; u20 < lx0.length; u20++) {
+          num0 += (lx0[u20] - mx0) * (ly0[u20] - my0);
+          den0 += (lx0[u20] - mx0) * (lx0[u20] - mx0);
+        }
+        return { rLast: rL, rPrev: rP, kSlope: den0 > 0 ? num0 / den0 : 0 };
+      }
+
+      /* 先把 s ∈ [0, 1]（两段 24 点 GL）并入 initVal，使后续倍增壳严格为 [2^k, 2^(k+1)]：
+         这样 ln(s_k) = k·ln(2) 无 2^(-k) 偏移扰动，几何尾与迭代对数代数尾均可外推至 20+ 位 */
+      var evals = initEvals;
+      var zero = new D(0), half = new D('0.5');
+      var s0a = glIntegratePanel(hFn, zero, half, rule24);
+      var s0b = glIntegratePanel(hFn, half, one, rule24);
+      evals += 2 * rule24.n;
+      if (!s0a.isFinite() || !s0b.isFinite()) return null;
+      var s0a16 = glIntegratePanel(hFn, zero, half, rule16);
+      var s0b16 = glIntegratePanel(hFn, half, one, rule16);
+      evals += 2 * rule16.n;
+      if (s0a16.isFinite() && s0b16.isFinite()) {
+        initDiff = D.max(initDiff, s0a.minus(s0a16).abs().plus(s0b.minus(s0b16).abs()));
+      }
+      initVal = initVal.plus(s0a).plus(s0b);
+
+      /* 前 6 个壳用 24 点 GL，其余壳用 16 点 GL；严格 2^k 倍增共 28 壳（k=22 时提前检验发散） */
+      var shells = [], shellQuadErr = new D(0);
+      var sCur = one, width = one;
+      for (var k = 0; k < 28; k++) {
+        var sNext = sCur.plus(width);
+        var useR = k < 6 ? rule24 : rule16;
+        var sk = glIntegratePanel(hFn, sCur, sNext, useR);
+        evals += useR.n;
+        if (!sk.isFinite()) return null;
+        if (k === 5) {
+          var sk16 = glIntegratePanel(hFn, sCur, sNext, rule16);
+          evals += rule16.n;
+          if (sk16.isFinite()) shellQuadErr = sk.minus(sk16).abs();
+        }
+        shells.push(sk);
+        sCur = sNext;
+        width = width.mul(two);
+        if (k >= 12 && sk.abs().lte(shells[0].abs().plus('1e-300').mul(new D(10).pow(-(digits + 12))))) {
+          var fastSum = initVal;
+          for (var fi = 0; fi < shells.length; fi++) fastSum = fastSum.plus(shells[fi]);
+          var sigF = D.max(sk.abs().mul(10), initDiff.mul(10), shellQuadErr.mul(100), fastSum.abs().plus('1e-300').mul(new D(10).pow(-digits)));
+          var digF = Math.min(40, sigF.div(fastSum.abs().plus('1e-300')).ln().div(new D(10).ln()).neg().toNumber());
+          return {
+            divergent: false, value: fastSum.toNumber(),
+            absInt: fastSum.abs().toNumber(),
+            valueText: fastSum.toSignificantDigits(digits + 6).toFixed(),
+            sigma: sigF.toNumber(), digits: Math.max(0, digF),
+            evals: evals, panels: shells.length, transformLabel: label
+          };
+        }
+        if (k === 22) {
+          var sSignE = shells[22].s;
+          var sameE = sSignE !== 0;
+          for (var ei = 10; ei <= 22; ei++) {
+            if (shells[ei].isZero() || shells[ei].s !== sSignE) { sameE = false; break; }
+          }
+          if (sameE) {
+            var stE = checkShellSlope(shells);
+            if (stE && (stE.rLast >= 0.9999 || (stE.rLast > 0.92 && stE.rLast >= stE.rPrev - 1e-4 && stE.kSlope >= -1.08))) {
+              return { divergent: true, slope: stE.kSlope, ratio: stE.rLast, evals: evals, transformLabel: label };
+            }
+          }
+        }
+      }
+
+      /* 检查尾段符号一致性与衰减特性 */
+      var startCheck = 8;
+      var tailSign = shells[shells.length - 1].s;
+      var sameSign = tailSign !== 0;
+      for (var si = startCheck; si < shells.length; si++) {
+        if (shells[si].isZero() || shells[si].s !== tailSign) { sameSign = false; break; }
+      }
+      if (!sameSign) return null;
+
+      var st = checkShellSlope(shells);
+      if (!st) return null;
+      var rLast = st.rLast, rPrev = st.rPrev, kSlope = st.kSlope;
+
+      /* 迭代对数发散判定：壳本身增长，或比值趋近 1（非几何衰减）且 log-log 斜率 >= -1.08 */
+      if (rLast >= 0.9999 || (rLast > 0.92 && rLast >= rPrev - 1e-4 && kSlope >= -1.08)) {
+        return { divergent: true, slope: kSlope, ratio: rLast, evals: evals, transformLabel: label };
+      }
+
+      var skipPre = 4;
+      var preSum = initVal;
+      for (var p0 = 0; p0 < skipPre; p0++) preSum = preSum.plus(shells[p0]);
+      var tailSh = shells.slice(skipPre);
+      var sums = [], acc = new D(0);
+      for (var j = 0; j < tailSh.length; j++) { acc = acc.plus(tailSh[j]); sums.push(acc); }
+
+      var bestVal = null, bestGap = null, bestTag = '';
+      var n1 = tailSh.length - 5, n2 = tailSh.length;
+      var w1 = wynnEpsDec(sums.slice(0, n1));
+      var w2 = wynnEpsDec(sums.slice(0, n2));
+      if (w1.value.isFinite() && w2.value.isFinite()) {
+        var wg = D.max(w1.value.minus(w2.value).abs(), w2.err);
+        bestVal = preSum.plus(w2.value);
+        bestGap = wg;
+        bestTag = 'Decimal Wynn-ε';
+      }
+
+      if (kSlope < -1.12) {
+        /* 使用真实倍增壳索引 k（skipL = 8 起，已远离 x = a + e^s 初期偏置）计算双阶 Levin-u */
+        var skipL = 8;
+        var preSumL = initVal;
+        for (var pL = 0; pL < skipL; pL++) preSumL = preSumL.plus(shells[pL]);
+        var absAll = shells.map(function (v) { return v.abs(); });
+        var ord2 = absAll.length - 1 - skipL;
+        var ord1 = Math.max(8, ord2 - 4);
+        var l1 = levinU(absAll, skipL, ord1);
+        var l2 = levinU(absAll, skipL, ord2);
+        if (l1.isFinite() && l2.isFinite()) {
+          var lg = l1.minus(l2).abs();
+          var lv = preSumL.plus(tailSign > 0 ? l2 : l2.neg());
+          if (!bestGap || lg.lt(bestGap)) {
+            bestVal = lv;
+            bestGap = lg;
+            bestTag = 'Decimal Levin-u';
+          }
+        }
+      }
+
+      if (!bestVal || !bestVal.isFinite() || !bestGap) return null;
+      var refScale = D.max(bestVal.abs(), initVal.abs(), shells[0].abs(), new D('1e-300'));
+      if (bestGap.gt(refScale.mul('1e-6'))) return null;
+
+      /* 将外推误差、首段误差与单壳 GL 求积误差统一纳入保守 σ */
+      var sig = D.max(bestGap.mul(16), initDiff.mul(10), shellQuadErr.mul(200), refScale.mul(new D(10).pow(-Math.min(digits, 22))));
+      var dig = Math.min(40, sig.div(refScale).ln().div(new D(10).ln()).neg().toNumber());
+      return {
+        divergent: false,
+        value: bestVal.toNumber(),
+        absInt: bestVal.abs().toNumber(),
+        valueText: bestVal.toSignificantDigits(digits + 6).toFixed(),
+        sigma: sig.toNumber(),
+        digits: Math.max(0, dig),
+        evals: evals,
+        panels: shells.length,
+        gap: bestGap.toNumber(),
+        transformLabel: label + '（' + bestTag + '）'
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      D.set({ precision: oldPrec });
+    }
+  }
+
+  /* ---------- 精化内部奇点/折点/阶跃/尖峰（用于分段高精度求积） ---------- */
   function refineSplitDecimal(fSrc, targetNum, kind, aNum, bNum, workPrec) {
     var oldPrec = D.precision;
-    D.set({ precision: workPrec || 60 });
+    var prec = Math.max(workPrec || 60, 88);
+    D.set({ precision: prec });
     try {
-      /* 1. 优先尝试常见精确值吸附（整数、小分母有理数、π 有理倍） */
-      var tolAdsorb = 1e-12 * Math.max(1, Math.abs(targetNum));
       var fDec = compileDec(fSrc);
       var PI = decPI();
-      var candidates = [];
-      for (var q = 1; q <= 24; q++) {
-        var p = Math.round(targetNum * q);
-        if (Math.abs(targetNum - p / q) <= tolAdsorb) candidates.push(new D(p).div(q));
-        var pPi = Math.round((targetNum / Math.PI) * q);
-        if (Math.abs(targetNum - (pPi * Math.PI) / q) <= tolAdsorb) candidates.push(PI.mul(pPi).div(q));
-      }
-      if (candidates.length) {
-        for (var ci = 0; ci < candidates.length; ci++) {
-          var cand = candidates[ci];
+      function tryAdsorb(numVal, tol) {
+        var cands = [];
+        for (var q = 1; q <= 24; q++) {
+          var p = Math.round(numVal * q);
+          if (Math.abs(numVal - p / q) <= tol) cands.push(new D(p).div(q));
+          var pPi = Math.round((numVal / Math.PI) * q);
+          if (Math.abs(numVal - (pPi * Math.PI) / q) <= tol) cands.push(PI.mul(pPi).div(q));
+        }
+        for (var ci = 0; ci < cands.length; ci++) {
+          var cand = cands[ci];
           var cn = cand.toNumber();
           if (cn > aNum && cn < bNum) {
             if (kind === 'singularity') {
@@ -1853,15 +2420,75 @@
             }
           }
         }
+        return null;
       }
-      /* 2. 一般内部折点/奇点：直接用高分辨率 Decimal 局部扫描精化 */
-      var span = Math.max(1e-11 * (1 + Math.abs(targetNum)), 1e-12);
+
+      /* 1. 快速吸附（若 float64 已经命中精确有理点或 π 有理倍） */
+      var fastHit = tryAdsorb(targetNum, 1e-12 * Math.max(1, Math.abs(targetNum)));
+      if (fastHit) return fastHit;
+
+      /* 2. 宽窗 Decimal 精化（1e-5 括号，避免 sqrt(1-cos(2x)) 在 float64 中因 h² 下溢偏离 1e-8 而漏括） */
+      var span = Math.max(1e-5 * (1 + Math.abs(targetNum)), 1e-6);
       var lo = new D(Math.max(aNum, targetNum - span));
       var hi = new D(Math.min(bNum, targetNum + span));
-      if (kind === 'kink') {
-        /* 检测导数跳变或符号变化点，用黄金分割缩小 */
-        for (var step = 0; step < 30; step++) {
+      var stopW = new D(10).pow(-(Math.max(25, prec - 14))).mul(D.max(new D(1), new D(Math.abs(targetNum))));
+      var two = new D(2);
+      var refined = null;
+
+      if (kind === 'jump') {
+        var floJ = evalDec(fDec, lo), fhiJ = evalDec(fDec, hi);
+        if (floJ.isFinite() && fhiJ.isFinite()) {
+          for (var sj = 0; sj < 200; sj++) {
+            if (hi.minus(lo).lte(stopW)) break;
+            var midJ = lo.plus(hi).div(two);
+            var fmJ = evalDec(fDec, midJ);
+            if (!fmJ.isFinite()) { lo = hi = midJ; break; }
+            if (fmJ.minus(floJ).abs().gte(fhiJ.minus(fmJ).abs())) { hi = midJ; fhiJ = fmJ; }
+            else { lo = midJ; floJ = fmJ; }
+          }
+          refined = lo.plus(hi).div(two);
+        }
+      } else if (kind === 'singularity' || kind === 'peak') {
+        var faS = evalDec(fDec, lo), fbS = evalDec(fDec, hi);
+        if (kind === 'singularity' && faS.isFinite() && fbS.isFinite() && faS.mul(fbS).lt(0)) {
+          for (var sb = 0; sb < 200; sb++) {
+            if (hi.minus(lo).lte(stopW)) break;
+            var midS = lo.plus(hi).div(two);
+            var fmS = evalDec(fDec, midS);
+            if (!fmS.isFinite()) { refined = midS; break; }
+            if (faS.mul(fmS).gt(0)) { lo = midS; faS = fmS; }
+            else { hi = midS; fbS = fmS; }
+          }
+          if (!refined) refined = lo.plus(hi).div(two);
+        } else {
+          var phi = decPHI().minus(1);
+          var x1 = hi.minus(phi.mul(hi.minus(lo)));
+          var x2 = lo.plus(phi.mul(hi.minus(lo)));
+          var v1 = evalDec(fDec, x1), v2 = evalDec(fDec, x2);
+          var m1s = v1.isFinite() ? v1.abs() : new D(Infinity);
+          var m2s = v2.isFinite() ? v2.abs() : new D(Infinity);
+          for (var gs = 0; gs < 220; gs++) {
+            if (hi.minus(lo).lte(stopW)) break;
+            if (!v1.isFinite()) { refined = x1; break; }
+            if (!v2.isFinite()) { refined = x2; break; }
+            if (m1s.gt(m2s)) {
+              hi = x2; x2 = x1; v2 = v1; m2s = m1s;
+              x1 = hi.minus(phi.mul(hi.minus(lo)));
+              v1 = evalDec(fDec, x1);
+              m1s = v1.isFinite() ? v1.abs() : new D(Infinity);
+            } else {
+              lo = x1; x1 = x2; v1 = v2; m1s = m2s;
+              x2 = lo.plus(phi.mul(hi.minus(lo)));
+              v2 = evalDec(fDec, x2);
+              m2s = v2.isFinite() ? v2.abs() : new D(Infinity);
+            }
+          }
+          if (!refined) refined = lo.plus(hi).div(two);
+        }
+      } else if (kind === 'kink') {
+        for (var step = 0; step < 180; step++) {
           var w = hi.minus(lo);
+          if (w.lte(stopW)) break;
           var m1 = lo.plus(w.mul('0.25')), m2 = lo.plus(w.mul('0.5')), m3 = lo.plus(w.mul('0.75'));
           var f0 = evalDec(fDec, lo), f1 = evalDec(fDec, m1), f2 = evalDec(fDec, m2), f3 = evalDec(fDec, m3), f4 = evalDec(fDec, hi);
           if (!f0.isFinite() || !f1.isFinite() || !f2.isFinite() || !f3.isFinite() || !f4.isFinite()) break;
@@ -1872,7 +2499,17 @@
           else if (dR.gte(dM) && dR.gte(dL)) lo = m2;
           else { lo = m1; hi = m3; }
         }
-        return lo.plus(hi).div(2).toString();
+        refined = lo.plus(hi).div(two);
+      }
+
+      if (refined && refined.isFinite()) {
+        /* 精化后再做精确有理/π倍吸附（Decimal 差 <= 1e-18） */
+        var refNum = refined.toNumber();
+        var postHit = tryAdsorb(refNum, 1e-13 * Math.max(1, Math.abs(refNum)));
+        if (postHit && new D(postHit).minus(refined).abs().lte(new D('1e-18').mul(D.max(new D(1), refined.abs())))) {
+          return postHit;
+        }
+        return refined.toString();
       }
       return String(targetNum);
     } catch (e) {
@@ -1885,6 +2522,7 @@
   global.IntegralHP = {
     available: true,
     compile: compileDec,
+    compileSplit: compileSplitDec,
     parseBoundDec: parseBoundDec,
     tanhSinh: tanhSinh,
     expSinh: expSinh,
@@ -1893,6 +2531,7 @@
     integrateOsc: integrateOsc,
     integrateOscGeneral: integrateOscGeneral,
     integratePosOsc: integratePosOsc,
+    integrateLogTailDec: integrateLogTailDec,
     refineSplitDecimal: refineSplitDecimal,
     decPI: decPI
   };

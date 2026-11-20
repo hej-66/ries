@@ -47,12 +47,67 @@
     return out;
   }
 
-  /* 名字转换：本页的 ln 就是自然对数，但 nerdamer 只认 log。
-     不转的话 nerdamer 会把 ln(x) 解析成「变量 ln 乘以 x」，
-     求出的「反导数」是 (1/2)x²·ln，然后被数值验证拦下 —— 表现为「符号层不可用」。
-     只转传给引擎的那份，验证仍用用户原文（本页编译器 ln/log 都认）。 */
+  /* 名字与语法规范化：
+     1. 统一 Unicode 符号（π → pi、² → ^2、³ → ^3、− → -、·/× → *、** → ^）
+     2. 补齐隐式乘法（如 2πx → 2*pi*x、2x → 2*x），保留函数调用 sin(...) 不插入 *
+     3. 本页 ln 转 nerdamer 的 log，并展开 pow(a,b) → ((a)^(b)) */
+  var SYM_FUNCS = {
+    sin: 1, cos: 1, tan: 1, sec: 1, csc: 1, cot: 1,
+    asin: 1, acos: 1, atan: 1, sinh: 1, cosh: 1, tanh: 1,
+    asinh: 1, acosh: 1, atanh: 1, exp: 1, log: 1, ln: 1,
+    sqrt: 1, cbrt: 1, abs: 1, pow: 1
+  };
+
+  function normalizeForEngine(expr) {
+    var s = String(expr).trim();
+    var ts = [], i = 0;
+    while (i < s.length) {
+      var c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        var m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s.slice(i));
+        if (m) { ts.push({ t: 'num', v: m[0] }); i += m[0].length; continue; }
+      }
+      if (c === 'π') { ts.push({ t: 'id', v: 'pi' }); i++; continue; }
+      if (c === '∞') { ts.push({ t: 'id', v: 'Infinity' }); i++; continue; }
+      if (/[a-zA-Z_]/.test(c)) {
+        var m2 = /^[a-zA-Z_][a-zA-Z0-9_]*/.exec(s.slice(i));
+        var id = m2[0];
+        var low = id.toLowerCase();
+        if (low === 'ln') id = 'log';
+        else if (low === 'pi') id = 'pi';
+        ts.push({ t: 'id', v: id, low: low });
+        i += m2[0].length;
+        continue;
+      }
+      if (c === '*' && s[i + 1] === '*') { ts.push({ t: 'op', v: '^' }); i += 2; continue; }
+      if (c === '−') { ts.push({ t: 'op', v: '-' }); i++; continue; }
+      if (c === '·' || c === '×') { ts.push({ t: 'op', v: '*' }); i++; continue; }
+      if (c === '²') { ts.push({ t: 'op', v: '^' }, { t: 'num', v: '2' }); i++; continue; }
+      if (c === '³') { ts.push({ t: 'op', v: '^' }, { t: 'num', v: '3' }); i++; continue; }
+      if (c === '(') { ts.push({ t: 'lp', v: '(' }); i++; continue; }
+      if (c === ')') { ts.push({ t: 'rp', v: ')' }); i++; continue; }
+      if (c === ',') { ts.push({ t: 'comma', v: ',' }); i++; continue; }
+      ts.push({ t: 'op', v: c });
+      i++;
+    }
+    var out = [];
+    for (var k = 0; k < ts.length; k++) {
+      var cur = ts[k];
+      if (k > 0) {
+        var prev = ts[k - 1];
+        var prevEnds = prev.t === 'num' || prev.t === 'rp' ||
+          (prev.t === 'id' && !(SYM_FUNCS[prev.low || prev.v.toLowerCase()] && cur.t === 'lp'));
+        var curStarts = cur.t === 'num' || cur.t === 'id' || cur.t === 'lp';
+        if (prevEnds && curStarts) out.push('*');
+      }
+      out.push(cur.v);
+    }
+    return out.join('');
+  }
+
   function toEngine(expr) {
-    return expandPow(String(expr).replace(/\bln\s*\(/gi, 'log('));
+    return expandPow(normalizeForEngine(expr));
   }
 
   function samplePoints(a, b, n) {
@@ -156,14 +211,16 @@
   function finish(raw, fText, aRaw, bRaw, numericValue) {
     var a, b;
     try { a = C.parseBound(aRaw); b = C.parseBound(bRaw); } catch (e) { return null; }
-    if (!(b > a)) return null;
+    if (isNaN(a) || isNaN(b) || a === b) return null;
+    var lo = a < b ? a : b;
+    var hi = a < b ? b : a;
 
-    var worst = verifyDerivative(raw.Ds, fText, a, b);
+    var worst = verifyDerivative(raw.Ds, fText, lo, hi);
     if (worst === null || worst > 1e-6) return null;
 
     if (C.hasInteriorDivergence) {
       try {
-        if (C.hasInteriorDivergence(C.compile(fText), a, b)) return null;
+        if (C.hasInteriorDivergence(C.compile(fText), lo, hi)) return null;
       } catch (e) {}
     }
 
@@ -195,7 +252,7 @@
     '  var s=String(raw).trim().toLowerCase().replace(/\\s/g,"");',
     '  if(s==="inf"||s==="+inf"||s==="infinity"||s==="∞"||s==="+∞")return "Infinity";',
     '  if(s==="-inf"||s==="-infinity"||s==="-∞")return "-Infinity";',
-    '  return s;',
+    '  return s.replace(/π/g,"pi").replace(/−/g,"-").replace(/[·×]/g,"*").replace(/²/g,"^2").replace(/³/g,"^3").replace(/(\\d)(pi\\b)/g,"$1*$2");',
     '}',
     'function __evalAt(Fs,bt){',
     '  if(bt==="Infinity"||bt==="-Infinity")return nerdamer("limit("+Fs+",x,"+bt+")").toString();',
@@ -353,7 +410,7 @@
       var s = String(raw).trim().toLowerCase().replace(/\s/g, '');
       if (s === 'inf' || s === '+inf' || s === 'infinity' || s === '∞' || s === '+∞') return 'Infinity';
       if (s === '-inf' || s === '-infinity' || s === '-∞') return '-Infinity';
-      return s;
+      return toEngine(raw);
     }
     function evalAt(F, bt) {
       if (bt === 'Infinity' || bt === '-Infinity') return n('limit(' + F + ',x,' + bt + ')').toString();
