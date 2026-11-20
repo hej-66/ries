@@ -156,6 +156,15 @@
     asinh: function (x) { return x.asinh(); },
     acosh: function (x) { return x.acosh(); },
     atanh: function (x) { return x.atanh(); },
+    arcsin: function (x) { return x.asin(); },
+    arccos: function (x) { return x.acos(); },
+    arctan: function (x) { return x.atan(); },
+    arcsinh: function (x) { return x.asinh(); },
+    arccosh: function (x) { return x.acosh(); },
+    arctanh: function (x) { return x.atanh(); },
+    arsinh: function (x) { return x.asinh(); },
+    arcosh: function (x) { return x.acosh(); },
+    artanh: function (x) { return x.atanh(); },
     exp: function (x) {
       if (x.isNaN()) return new D(NaN);
       if (x.lt(-1e13)) return new D(0);
@@ -359,37 +368,71 @@
       return sum;
     }
     function sdCall1(name, fn, A) {
+      var canon = name;
+      if (canon === 'arctanh' || canon === 'artanh') canon = 'atanh';
+      else if (canon === 'arcsinh' || canon === 'arsinh') canon = 'asinh';
+      else if (canon === 'arccosh' || canon === 'arcosh') canon = 'acosh';
+      else if (canon === 'arcsin') canon = 'asin';
+      else if (canon === 'arccos') canon = 'acos';
+      else if (canon === 'arctan') canon = 'atan';
+
       if (A.b.isZero()) {
         if (!A.d.isZero() && A.d.isFinite() && A.d.abs().lt(SMALL_TH)) {
-          if (name === 'exp') return { b: ONE, d: expm1Taylor(A.d) };
-          if (name === 'cos') return { b: ONE, d: cosm1Taylor(A.d) };
+          if (canon === 'exp') return { b: ONE, d: expm1Taylor(A.d) };
+          if (canon === 'cos') return { b: ONE, d: cosm1Taylor(A.d) };
         }
         return { b: ZERO, d: fn(A.d) };
       }
       if (A.d.isZero()) return { b: fn(A.b), d: ZERO };
-      if ((name === 'ln' || name === 'log') && A.b.eq(ONE) && A.d.isFinite() && A.d.abs().lt(SMALL_TH)) {
+      if ((canon === 'ln' || canon === 'log') && A.b.eq(ONE) && A.d.isFinite() && A.d.abs().lt(SMALL_TH)) {
         return { b: ZERO, d: log1pTaylor(A.d) };
       }
-      if ((name === 'floor' || name === 'ceil' || name === 'round' || name === 'sign') &&
+      /* 反双曲 / 反三角函数在分支点 ±1 处精确防相消：即使 |d| < 10^-workPrec 也能避免 1+d 舍入为 1 导致 Inf/NaN */
+      if (canon === 'atanh' && A.d.isFinite() && A.d.abs().lt(ONE)) {
+        if (A.b.eq(ONE) && A.d.s < 0) {
+          var negD = A.d.neg();
+          return { b: ZERO, d: TWO.plus(A.d).ln().minus(negD.ln()).mul(HALF) };
+        }
+        if (A.b.eq(ONE.neg()) && A.d.s > 0) {
+          return { b: ZERO, d: A.d.ln().minus(TWO.minus(A.d).ln()).mul(HALF) };
+        }
+      }
+      if (canon === 'acosh' && A.b.eq(ONE) && A.d.isFinite() && A.d.s > 0 && A.d.lt(ONE)) {
+        var sqAc = A.d.mul(TWO.plus(A.d)).sqrt();
+        return { b: ZERO, d: ONE.plus(A.d).plus(sqAc).ln() };
+      }
+      if ((canon === 'acos' || canon === 'asin') && A.d.isFinite() && A.d.abs().lt(ONE)) {
+        if (A.b.eq(ONE) && A.d.s < 0) {
+          var ang1 = A.d.neg().mul(HALF).sqrt().asin().mul(TWO);
+          if (canon === 'acos') return { b: ZERO, d: ang1 };
+          return { b: D.acos(ZERO), d: ang1.neg() };
+        }
+        if (A.b.eq(ONE.neg()) && A.d.s > 0) {
+          var ang2 = A.d.mul(HALF).sqrt().asin().mul(TWO);
+          if (canon === 'acos') return { b: D.acos(ONE.neg()), d: ang2.neg() };
+          return { b: D.acos(ZERO).neg(), d: ang2 };
+        }
+      }
+      if ((canon === 'floor' || canon === 'ceil' || canon === 'round' || canon === 'sign') &&
           A.b.isFinite() && A.d.isFinite()) {
-        if (name === 'sign') {
+        if (canon === 'sign') {
           if (A.b.isZero()) return { b: new D(A.d.s), d: ZERO };
           if (A.d.abs().lt(A.b.abs())) return { b: new D(A.b.s), d: ZERO };
         } else if (A.b.isInteger() && A.d.abs().lt(ONE)) {
-          if (name === 'floor') return { b: A.d.s < 0 ? A.b.minus(ONE) : A.b, d: ZERO };
-          if (name === 'ceil') return { b: A.d.s > 0 ? A.b.plus(ONE) : A.b, d: ZERO };
-          if (name === 'round' && A.d.abs().lt(HALF)) return { b: A.b, d: ZERO };
+          if (canon === 'floor') return { b: A.d.s < 0 ? A.b.minus(ONE) : A.b, d: ZERO };
+          if (canon === 'ceil') return { b: A.d.s > 0 ? A.b.plus(ONE) : A.b, d: ZERO };
+          if (canon === 'round' && A.d.abs().lt(HALF)) return { b: A.b, d: ZERO };
         }
       }
       var vBase = fn(A.b);
       if (!vBase.isFinite()) return { b: ZERO, d: fn(A.b.plus(A.d)) };
       var vFull = fn(A.b.plus(A.d));
       if (vFull.eq(vBase)) {
-        if (name === 'sin') return { b: vBase, d: DFUNCS.cos(A.b).mul(A.d).minus(HALF.mul(vBase).mul(A.d).mul(A.d)) };
-        if (name === 'cos') return { b: vBase, d: DFUNCS.sin(A.b).neg().mul(A.d).minus(HALF.mul(vBase).mul(A.d).mul(A.d)) };
-        if (name === 'exp') return { b: vBase, d: vBase.mul(A.d) };
-        if (name === 'ln' || name === 'log') return { b: vBase, d: A.d.div(A.b) };
-        if (name === 'sqrt' && !vBase.isZero()) return { b: vBase, d: A.d.div(vBase.mul(TWO)) };
+        if (canon === 'sin') return { b: vBase, d: DFUNCS.cos(A.b).mul(A.d).minus(HALF.mul(vBase).mul(A.d).mul(A.d)) };
+        if (canon === 'cos') return { b: vBase, d: DFUNCS.sin(A.b).neg().mul(A.d).minus(HALF.mul(vBase).mul(A.d).mul(A.d)) };
+        if (canon === 'exp') return { b: vBase, d: vBase.mul(A.d) };
+        if (canon === 'ln' || canon === 'log') return { b: vBase, d: A.d.div(A.b) };
+        if (canon === 'sqrt' && !vBase.isZero()) return { b: vBase, d: A.d.div(vBase.mul(TWO)) };
       }
       return { b: vBase, d: vFull.minus(vBase) };
     }

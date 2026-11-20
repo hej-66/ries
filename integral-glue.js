@@ -12,18 +12,19 @@
  *  4. 概率上限受输入位数约束：候选不能比喂进去的数更可信。
  *  5. 振荡未收敛（oscillatory）时明确拒绝给数，不再冒充发散或硬凑闭式。
  */
-(function () {
+(function (global) {
   'use strict';
-  var C = window.IntegralCore;
-  if (!C) { console.error('IntegralCore 未加载'); return; }
-  var $ = function (id) { return document.getElementById(id); };
-  var el = {
+  var isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined';
+  var C = (isBrowser ? window.IntegralCore : global.IntegralCore) || null;
+  if (isBrowser && !C) { console.error('IntegralCore 未加载'); return; }
+  var $ = function (id) { return isBrowser ? document.getElementById(id) : null; };
+  var el = isBrowser ? {
     f: $('igF'), a: $('igA'), b: $('igB'), run: $('igRun'),
     status: $('igStatus'), result: $('igResult'), out: $('igOut'),
     cand: $('igCandidates'), candBody: $('igCandBody'),
     exPlus: $('igExPlus'), exMinus: $('igExMinus'), exSimple: $('igExSimple'),
     sym: $('igSymbolic'), symEq: $('igSymEq'), symValue: $('igSymValue'), symFoot: $('igSymFoot')
-  };
+  } : {};
   var last = null;
   var riesTarget = null;
 
@@ -188,7 +189,304 @@
      inputDigits：喂进 RIES 的那个数本身有几位可信。
      候选比「数据的精度」还吻合的部分不算证据 —— 那是在拟合数值误差，不是在发现结构。
      注意这只是给候选降权，不改变搜索范围：搜不搜和信不信是两件事。 */
-  function guessProbability(rel, formula, sigma, value, verified, terms, parametric, height, inputDigits) {
+  /* 等价积分 / 未求值级数变形判定：
+     对定积分题目而言，返回另一个未求值的定积分（int_0^1 ... dx、∫）或无穷级数（sum_...、∑）
+     只是换元或级数重写，并非闭式结果，绝不能以高置信度冒充闭式误导用户。 */
+  function isIntegralOrSumForm(formula, fullText) {
+    var f = String(formula || '');
+    var t = String(fullText || '');
+    if (/\bint(?:_|\s*\^|\s*0|\s*-inf|\s*\\limits)/i.test(f) || /∫/.test(f)) return true;
+    if (/\bsum(?:_|\s*\^|\s*\()/i.test(f) || /∑/.test(f)) return true;
+    if (/积分\s*\/\s*求和数据库|integral\s*\/\s*sum/i.test(f) &&
+        (/\bd[xtuv]\b|∫|∑|\bint\b|\bsum\b/i.test(f) || /integral|sum family/i.test(t))) {
+      return true;
+    }
+    return false;
+  }
+
+  function isParametricForm(formula, fullText) {
+    var f = String(formula || '');
+    var t = String(fullText || '');
+    return /α|\\alpha|三次有理比|degree-3 ratio|α 满足|α satisfies|α 为以下方程的根|α root of/i.test(t) ||
+      /常数数据库|constant database|代数关系|algebraic relation/i.test(f) ||
+      /=\s*0\s*$/.test(f.replace(/复制|copy/ig, '').trim());
+  }
+
+  /* 48 位高精度 Decimal 独立复核：
+     RIES 内部只吃 17 位 Float64，高自由度 Möbius / log|c| / 对数组合极易在 16 位上撞出 0.00e+0 伪巧合。
+     当定积分数值层已算出 >= 17.5 位高精度 valueText 时，用 48 位 Decimal 直接把候选公式代回去复算：
+     若偏差远超 σ（例如在 25 位真值下第 17 位即崩坏），立即数学证伪为「浮点巧合」，彻底杜绝误导。 */
+  function evalRiesDec(exprStr, xDec, D) {
+    var s = String(exprStr || '').trim();
+    if (!s) return null;
+    /* 处理 RIES 的 log|log|x||、log|x| 绝对值记法以及 log(log π) / log(log 2) 等空格参数记法 */
+    s = s.replace(/log\|log\|([^|]+)\|\|/gi, 'ln(abs(ln(abs($1))))')
+         .replace(/log\|([^|]+)\|/gi, 'ln(abs($1))')
+         .replace(/ln\|([^|]+)\|/gi, 'ln(abs($1))')
+         .replace(/\b(log|ln)\s+(√(?:\d+|[πeφγ])|π|pi|e|φ|γ|G|\d+(?:\.\d+)?)(?![a-zA-Z0-9_πφγ])/gi, '$1($2)');
+    if (/[|]|∫|∑|α|₂F|₃F|ζ|Γ|Cl₂|Ti₂|Li₂/.test(s) || /int_|sum_|\\alpha|log_|_?[123]F[012]\b|\bLi_?\d/i.test(s)) return null;
+
+    var ts = [], i = 0;
+    while (i < s.length) {
+      var c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        var m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s.slice(i));
+        if (!m) return null;
+        ts.push({ t: 'num', v: m[0] }); i += m[0].length; continue;
+      }
+      if (c === '√') {
+        i++;
+        while (i < s.length && /\s/.test(s[i])) i++;
+        if (s[i] === '(') {
+          ts.push({ t: 'id', v: 'sqrt' });
+        } else {
+          /* √2、√π、√e 等无括号根号 */
+          var mRad = /^(?:\d+\.?\d*|[a-zA-Zπφγ]+)/.exec(s.slice(i));
+          if (!mRad) return null;
+          ts.push({ t: 'id', v: 'sqrt' }, { t: 'lp' });
+          if (/^\d/.test(mRad[0])) ts.push({ t: 'num', v: mRad[0] });
+          else ts.push({ t: 'id', v: mRad[0] });
+          ts.push({ t: 'rp' });
+          i += mRad[0].length;
+        }
+        continue;
+      }
+      if (c === 'π' || c === 'φ' || c === 'γ') { ts.push({ t: 'id', v: c }); i++; continue; }
+      if (/[a-zA-Z]/.test(c)) {
+        var m2 = /^[a-zA-Z][a-zA-Z0-9π]*/.exec(s.slice(i));
+        ts.push({ t: 'id', v: m2[0] }); i += m2[0].length; continue;
+      }
+      if (c === '*' && s[i + 1] === '*') { ts.push({ t: 'op', v: '^' }); i += 2; continue; }
+      if ('+-*/^'.indexOf(c) >= 0) { ts.push({ t: 'op', v: c }); i++; continue; }
+      if (c === '−' || c === '–') { ts.push({ t: 'op', v: '-' }); i++; continue; }
+      if (c === '·' || c === '×') { ts.push({ t: 'op', v: '*' }); i++; continue; }
+      if (c === '²') { ts.push({ t: 'op', v: '^' }, { t: 'num', v: '2' }); i++; continue; }
+      if (c === '³') { ts.push({ t: 'op', v: '^' }, { t: 'num', v: '3' }); i++; continue; }
+      if (c === '(') { ts.push({ t: 'lp' }); i++; continue; }
+      if (c === ')') { ts.push({ t: 'rp' }); i++; continue; }
+      if (c === ',') { ts.push({ t: 'comma' }); i++; continue; }
+      return null;
+    }
+
+    var FN_NAMES = {
+      sin: 1, cos: 1, tan: 1, asin: 1, acos: 1, atan: 1,
+      sinh: 1, cosh: 1, tanh: 1, asinh: 1, acosh: 1, atanh: 1,
+      sinpi: 1, cospi: 1, tanpi: 1, 'sinπ': 1, 'cosπ': 1, 'tanπ': 1,
+      exp: 1, ln: 1, log: 1, sqrt: 1, cbrt: 1, abs: 1, root: 1, pow: 1
+    };
+    var toks = [];
+    for (var k = 0; k < ts.length; k++) {
+      var prev = toks.length ? toks[toks.length - 1] : null;
+      var cur = ts[k];
+      if (prev && (prev.t === 'num' || prev.t === 'rp' || (prev.t === 'id' && !FN_NAMES[prev.v.toLowerCase()])) &&
+          (cur.t === 'id' || cur.t === 'lp' || cur.t === 'num')) {
+        toks.push({ t: 'op', v: '*' });
+      }
+      toks.push(cur);
+    }
+
+    var PI = D.acos(-1);
+    var E_CONST = new D(1).exp();
+    var PHI = new D(5).sqrt().plus(1).div(2);
+    var GAMMA = new D('0.577215664901532860606512090082402431042159335939923598805767');
+    var CATALAN = new D('0.915965594177219015054603514932384110774149374281672134266498');
+
+    var pos = 0;
+    function peek() { return toks[pos]; }
+    function parseExpr() {
+      var v = parseTerm();
+      if (!v) return null;
+      while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+        var op = toks[pos++].v;
+        var r = parseTerm();
+        if (!r) return null;
+        v = op === '+' ? v.plus(r) : v.minus(r);
+      }
+      return v;
+    }
+    function parseTerm() {
+      var v = parseUnary();
+      if (!v) return null;
+      while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
+        var op = toks[pos++].v;
+        var r = parseUnary();
+        if (!r) return null;
+        if (op === '/' && r.isZero()) return null;
+        v = op === '*' ? v.mul(r) : v.div(r);
+      }
+      return v;
+    }
+    function parseUnary() {
+      if (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+        var op = toks[pos++].v;
+        var u = parseUnary();
+        if (!u) return null;
+        return op === '-' ? u.neg() : u;
+      }
+      return parsePow();
+    }
+    function parsePow() {
+      var base = parseAtom();
+      if (!base) return null;
+      if (peek() && peek().t === 'op' && peek().v === '^') {
+        pos++;
+        var ex = parseUnary();
+        if (!ex) return null;
+        if (base.isNeg() && !ex.isInteger()) return null;
+        return base.pow(ex);
+      }
+      return base;
+    }
+    function parseAtom() {
+      var tk = peek();
+      if (!tk) return null;
+      if (tk.t === 'num') { pos++; return new D(tk.v); }
+      if (tk.t === 'lp') {
+        pos++;
+        var inner = parseExpr();
+        if (!inner || !peek() || peek().t !== 'rp') return null;
+        pos++;
+        return inner;
+      }
+      if (tk.t === 'id') {
+        pos++;
+        var raw = tk.v, low = raw.toLowerCase();
+        if (peek() && peek().t === 'lp') {
+          if (!FN_NAMES[low]) return null;
+          pos++;
+          var args = [];
+          if (!(peek() && peek().t === 'rp')) {
+            var a0 = parseExpr(); if (!a0) return null; args.push(a0);
+            while (peek() && peek().t === 'comma') {
+              pos++;
+              var ai = parseExpr(); if (!ai) return null; args.push(ai);
+            }
+          }
+          if (!peek() || peek().t !== 'rp') return null;
+          pos++;
+          if (args.length === 1) {
+            var u = args[0];
+            if (low === 'sqrt') return u.isNeg() ? null : u.sqrt();
+            if (low === 'cbrt') return u.cbrt();
+            if (low === 'abs') return u.abs();
+            if (low === 'exp') return u.abs().gt(1e4) ? null : u.exp();
+            if (low === 'ln' || low === 'log') return u.lte(0) ? null : u.ln();
+            if (low === 'sin') return u.sin();
+            if (low === 'cos') return u.cos();
+            if (low === 'tan') return u.tan();
+            if (low === 'sinpi' || low === 'sinπ') return u.mul(PI).sin();
+            if (low === 'cospi' || low === 'cosπ') return u.mul(PI).cos();
+            if (low === 'tanpi' || low === 'tanπ') return u.mul(PI).tan();
+            if (low === 'asin') return u.abs().gt(1) ? null : u.asin();
+            if (low === 'acos') return u.abs().gt(1) ? null : u.acos();
+            if (low === 'atan') return u.atan();
+            if (low === 'sinh') return u.sinh();
+            if (low === 'cosh') return u.cosh();
+            if (low === 'tanh') return u.tanh();
+            if (low === 'asinh') return u.asinh();
+            if (low === 'acosh') return u.lt(1) ? null : u.acosh();
+            if (low === 'atanh') return u.abs().gte(1) ? null : u.atanh();
+            return null;
+          }
+          if (args.length === 2) {
+            if (low === 'root') {
+              /* RIES 中 root(a, b) 定义为 a^(1/b) */
+              if (args[1].isZero()) return null;
+              var invB = new D(1).div(args[1]);
+              if (args[0].isNeg()) return null;
+              return args[0].pow(invB);
+            }
+            if (low === 'pow') {
+              if (args[0].isNeg() && !args[1].isInteger()) return null;
+              return args[0].pow(args[1]);
+            }
+          }
+          return null;
+        }
+        if (raw === 'x') return xDec;
+        if (raw === 'G') return CATALAN;
+        if (low === 'pi' || raw === 'π') return PI;
+        if (low === 'e') return E_CONST;
+        if (low === 'phi' || raw === 'φ') return PHI;
+        if (low === 'gamma' || raw === 'γ') return GAMMA;
+        return null;
+      }
+      return null;
+    }
+
+    try {
+      var res = parseExpr();
+      if (!res || pos !== toks.length || !res.isFinite()) return null;
+      return res;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function hpVerifyCandidate(formula, lastInfo) {
+    var D = (typeof Decimal !== 'undefined' ? Decimal : (global && global.Decimal)) || null;
+    if (!D || !lastInfo || !lastInfo.valueText || !(lastInfo.digits >= 17.5)) return null;
+    var s = String(formula || '').replace(/复制|copy/ig, '').trim();
+    var ci = s.indexOf('：');
+    if (ci >= 0) s = s.slice(ci + 1).trim();
+    else {
+      var ci2 = s.indexOf(':');
+      if (ci2 >= 0) s = s.slice(ci2 + 1).trim();
+    }
+    var eqIdx = s.indexOf('≈');
+    if (eqIdx < 0) eqIdx = s.indexOf('=');
+    if (eqIdx < 0) return null;
+    var lhsStr = s.slice(0, eqIdx).trim();
+    var rhsStr = s.slice(eqIdx + 1).trim();
+    if (!lhsStr || !rhsStr || /[=≈]/.test(rhsStr)) return null;
+
+    var oldPrec = D.precision;
+    D.set({ precision: 48 });
+    try {
+      var xDec = new D(String(lastInfo.valueText));
+      if (!xDec.isFinite()) return null;
+      var absVal = Math.max(Math.abs(lastInfo.value), 1e-300);
+      var hpErr = null;
+      if (lhsStr.replace(/[()\s]/g, '') === 'x') {
+        var rVal = evalRiesDec(rhsStr, xDec, D);
+        if (!rVal) return null;
+        hpErr = xDec.minus(rVal).abs().toNumber();
+      } else {
+        var l0 = evalRiesDec(lhsStr, xDec, D);
+        var r0 = evalRiesDec(rhsStr, xDec, D);
+        if (!l0 || !r0) return null;
+        var res0 = l0.minus(r0).abs();
+        var h = D.max(xDec.abs(), new D(1)).mul('1e-20');
+        var lp = evalRiesDec(lhsStr, xDec.plus(h), D);
+        var rp = evalRiesDec(rhsStr, xDec.plus(h), D);
+        var lm = evalRiesDec(lhsStr, xDec.minus(h), D);
+        var rm = evalRiesDec(rhsStr, xDec.minus(h), D);
+        if (!lp || !rp || !lm || !rm) return null;
+        var deriv = lp.minus(rp).minus(lm.minus(rm)).div(h.mul(2)).abs();
+        if (deriv.lte('1e-12')) {
+          if (res0.isZero()) hpErr = 0;
+          else return null;
+        } else {
+          hpErr = res0.div(deriv).toNumber();
+        }
+      }
+      if (!isFinite(hpErr)) return null;
+      var sigEff = Math.max(lastInfo.sigma || 0, absVal * Math.pow(10, -Math.min(lastInfo.digits, 25)));
+      var tol = Math.max(1e3 * sigEff, absVal * Math.pow(10, -Math.min(lastInfo.digits - 2, 22)));
+      var matched = hpErr > 0 ? Math.max(0, -Math.log10(hpErr / absVal)) : Math.min(lastInfo.digits, 30);
+      if (hpErr > tol) return { status: 'rejected', err: hpErr, matchedDigits: matched };
+      return { status: 'passed', err: hpErr, matchedDigits: matched };
+    } catch (e) {
+      return null;
+    } finally {
+      D.set({ precision: oldPrec });
+    }
+  }
+
+  function guessProbability(rel, formula, sigma, value, verified, terms, parametric, height, inputDigits, integralForm, hpCheck) {
+    if (integralForm) return 0;
+    if (hpCheck && hpCheck.status === 'rejected') return 0.01;
     if (!verified || !isFinite(rel) || !isFinite(value) || value === 0) return 0.01;
     var digits = -Math.log10(Math.max(rel, 1e-17));
     var usable = Math.min(digits, Math.max(0, isFinite(inputDigits) ? inputDigits : 17));
@@ -207,12 +505,12 @@
     /* 公式里出现的整数个数：4·G/π 只有 1 个（系数 4），
        而 (-15e+57πe)/(902e+21πe-47) 有 5 个 —— 后者是典型的 Möbius 拟合。 */
     var intCount = (core.match(/\d+/g) || []).length;
-    /* 异域函数：只有公式里真的出现才罚，不看模块名。
-       Möbius 模块既能给出 4·G/π（正确答案），也能给出
-       (-15e+57πe)/(902e+21πe-47)（纯拟合）—— 按模块名一刀切会误伤前者。
-       超几何 / L 函数 / ζ / Γ / Clausen 这类，每个都让「凑中」变得廉价。 */
-    var exotic = /对数组合关系|log-combination|log\|c\||硬常数数据库|hard constant|积分\s*\/\s*求和数据库|integral\/sum|L 函数有理比|L-rational|常数数据库|constant database|代数关系|algebraic relation|Cl₂|Clausen|Khinchin|Γ\(|Gamma\(|ζ\(|zeta|Ti₂|Bi\(|L\(f,|Glaisher|Apery|log Γ|hypergeometric|超几何|_?[123]F[012]\b|₂F₂|₂F₁|₃F₂/i.test(core);
-    var highFree = /Möbius 关系|Möbius relation|对数组合关系|log-combination|log\|c\|/i.test(formula) && (height || 0) > 40;
+    /* 异域函数与高自由度数据库：模块前缀从 formula 判，异域符号从 core 判（Möbius 仅按 height > 40 罚，不误伤 4·G/π）。 */
+    var exoticModule = /对数组合关系|log-combination|log\|c\||硬常数数据库|hard constant|积分\s*\/\s*求和数据库|integral\s*\/\s*sum|L 函数有理比|L-rational|常数数据库|constant database|代数关系|algebraic relation|超几何|hypergeometric/i.test(formula);
+    var exoticSymbol = /Cl₂|Clausen|Khinchin|Γ\(|Gamma\(|ζ\(|zeta|Ti₂|Bi\(|L\(f,|Glaisher|Apery|log Γ|_?[123]F[012]\b|₂F₂|₂F₁|₃F₂/i.test(core);
+    var exotic = exoticModule || exoticSymbol;
+    var isMobiusOrComb = /Möbius 关系|Möbius relation|对数组合关系|log-combination|log\|c\|/i.test(formula);
+    var highFree = isMobiusOrComb && (height || 0) > 40;
     var z = 1.15 * (usable - 8)
           - (parametric ? 0 : 0.045 * coreLen)
           - 1.10 * Math.log10(1 + K / 3)
@@ -223,7 +521,54 @@
           - (exotic ? 2.5 : 0)
           - 0.45 * Math.max(0, intCount - 1);
     var p = Math.min(0.99, Math.max(0.01, sigmoid(z)));
+    /* 高高度 Möbius / 对数组合（height > 60）在 16 位 Float64 下搜索空间极大，除非通过 20+ 位高精度复核，否则封顶 30% */
+    if (isMobiusOrComb && (height || 0) > 60 && !(hpCheck && hpCheck.status === 'passed')) {
+      p = Math.min(p, 0.30);
+    }
     return parametric ? Math.min(p, 0.30) : p;
+  }
+
+  function rankCandidates(rawRows, lastInfo) {
+    var inputDigits = lastInfo.digits;
+    var rows = rawRows.slice(0, 80).map(function (r) {
+      var integralForm = typeof r.integralForm === 'boolean' ? r.integralForm : isIntegralOrSumForm(r.formula, r.fullText);
+      var parametric = typeof r.parametric === 'boolean' ? r.parametric : isParametricForm(r.formula, r.fullText);
+      var hpCheck = (!integralForm && !parametric && r.verified) ? hpVerifyCandidate(r.formula, lastInfo) : null;
+      var hpRejected = !!(hpCheck && hpCheck.status === 'rejected');
+      var nonClosed = parametric || integralForm || hpRejected;
+      var rel = isFinite(r.delta) ? r.delta / Math.max(Math.abs(lastInfo.value), 1e-300) : NaN;
+      var p = guessProbability(rel, r.formula, lastInfo.sigma, lastInfo.value,
+                               r.verified, r.terms, parametric, r.height, inputDigits, integralForm, hpCheck);
+      return {
+        formula: r.formula, valueText: r.valueText, errText: r.errText,
+        delta: r.delta, verified: r.verified, terms: r.terms, height: r.height,
+        parametric: parametric, integralForm: integralForm,
+        hpCheck: hpCheck, hpRejected: hpRejected, nonClosed: nonClosed,
+        rel: rel, p: p
+      };
+    });
+    /* 通过复核的排前面；真闭式优先于等价积分变形、高精度否决项与参数化拟合；同组内按置信度降序 */
+    rows.sort(function (a, b) {
+      if (a.verified !== b.verified) return a.verified ? -1 : 1;
+      if (a.nonClosed !== b.nonClosed) return a.nonClosed ? 1 : -1;
+      if (a.nonClosed && a.hpRejected !== b.hpRejected) return a.hpRejected ? 1 : -1;
+      if (a.nonClosed && a.integralForm !== b.integralForm) return a.integralForm ? -1 : 1;
+      return (b.p || 0) - (a.p || 0);
+    });
+    var closed = rows.filter(function (r) { return !r.nonClosed; });
+    var hasReliableClosed = closed.some(function (r) { return r.verified && r.p >= 0.50; });
+    var good = closed.slice(0, 12);
+    var equivInt = rows.filter(function (r) { return r.integralForm; }).slice(0, 2);
+    var allRejected = rows.filter(function (r) { return r.hpRejected && !r.integralForm && !r.parametric; });
+    var rejected = allRejected.slice(0, 3);
+    var param = rows.filter(function (r) { return r.parametric && !r.integralForm; }).slice(0, 3);
+    return {
+      rows: good.concat(equivInt, rejected, param),
+      hasReliableClosed: hasReliableClosed,
+      closedCount: closed.length,
+      equivIntCount: equivInt.length,
+      hpRejectedCount: allRejected.length
+    };
   }
 
   /* 依据本次数值的有效位数，调整哪些模块参与搜索。
@@ -390,13 +735,11 @@
       // （基底含 β(3)…β(6)，Catalan G 的释义就是 "Dirichlet beta beta(2)"）。
       // 早先把它当参数化特征，会把含 Catalan G 的真闭式 (π/2)ln2−G 误判成非闭式并封顶 30%。
       // 真正的自由参数一律用 α，由下面的 α / α-根语言 / 模块名 / 整系数多项式=0 兜住。
-      var parametric =
-        /α|\\alpha|三次有理比|degree-3 ratio|α 满足|α satisfies|α 为以下方程的根|α root of/i.test(fullText) ||
-        /常数数据库|constant database|代数关系|algebraic relation/i.test(formula) ||
-        /=\s*0\s*$/.test(formula.replace(/复制|copy/ig, '').trim());
-      out.push({ formula: formula, valueText: valueText, errText: errText,
+      var integralForm = isIntegralOrSumForm(formula, fullText);
+      var parametric = isParametricForm(formula, fullText);
+      out.push({ formula: formula, valueText: valueText, fullText: fullText, errText: errText,
                  delta: delta, verified: verified, terms: terms, height: height,
-                 parametric: parametric });
+                 parametric: parametric, integralForm: integralForm });
     });
     return out;
   }
@@ -404,30 +747,37 @@
   function renderCandidates() {
     if (!last || riesTarget !== last || last.verdict === 'divergent' || last.verdict === 'oscillatory') return;
     var inputDigits = last.digits;
-    var rows = readRiesRows().slice(0, 80).map(function (r) {
-      r.rel = isFinite(r.delta) ? r.delta / Math.max(Math.abs(last.value), 1e-300) : NaN;
-      r.p = guessProbability(r.rel, r.formula, last.sigma, last.value,
-                             r.verified, r.terms, r.parametric, r.height, inputDigits);
-      return r;
-    });
-    // 通过复核的排前面；真闭式优先于参数化拟合；同组内按置信度降序
-    rows.sort(function (a, b) {
-      if (a.verified !== b.verified) return a.verified ? -1 : 1;
-      if (a.parametric !== b.parametric) return a.parametric ? 1 : -1;
-      return (b.p || 0) - (a.p || 0);
-    });
-    // 参数化拟合后置且单独保留几行，让用户看见它们被标为「非闭式」，而不是被截断消失
-    var good = rows.filter(function (r) { return !r.parametric; }).slice(0, 12);
-    var param = rows.filter(function (r) { return r.parametric; }).slice(0, 4);
-    rows = good.concat(param);
-    if (!rows.length) { el.cand.hidden = true; return; }
+    var ranked = rankCandidates(readRiesRows(), last);
+    var rows = ranked.rows;
+    var stopBtn = $('stopBtn');
+    var riesDone = !!(stopBtn && stopBtn.disabled);
+    if (!rows.length) {
+      el.cand.hidden = true;
+      if (riesDone) {
+        setStatus('闭式搜索完成：未找到可靠闭式结果，请以高精度数值结果为准。', 'warn');
+      }
+      return;
+    }
     el.cand.hidden = false;
-    el.candBody.innerHTML = rows.map(function (r) {
-      var prob = (r.p * 100).toFixed(1) + '%';
-      var level = r.p >= 0.8 ? 'ig-ok' : r.p >= 0.45 ? 'ig-warn' : 'ig-bad';
+    var banner = '';
+    if (!ranked.hasReliableClosed) {
+      var reasonParts = [];
+      if (ranked.hpRejectedCount > 0) reasonParts.push('高精度复核已否决 ' + ranked.hpRejectedCount + ' 项 16 位浮点巧合');
+      if (ranked.equivIntCount > 0) reasonParts.push('等价积分/级数变形不计为闭式');
+      var reason = reasonParts.length
+        ? '（' + reasonParts.join('；') + '）'
+        : '（仅检出低置信度巧合拟合）';
+      banner = '<tr><td colspan="4" class="ig-warn"><strong>未找到可靠闭式结果</strong>' + reason + '，以下条目仅供参考，请以高精度数值结果为准。</td></tr>';
+    }
+    el.candBody.innerHTML = banner + rows.map(function (r) {
+      var prob = r.integralForm ? '非闭式' : r.hpRejected ? '已否决' : (r.p * 100).toFixed(1) + '%';
+      var level = r.integralForm ? 'ig-warn' : r.hpRejected ? 'ig-bad' : (r.p >= 0.8 ? 'ig-ok' : r.p >= 0.45 ? 'ig-warn' : 'ig-bad');
       var check;
-      if (!r.verified) check = '未取到可信残差，不评分';
+      if (r.integralForm) check = '等价积分/级数变形，非闭式（原积分换元形式，不计入闭式排名）';
+      else if (r.hpRejected) check = '高精度复核未通过（偏差 ' + r.hpCheck.err.toExponential(2) + '，远超 σ，确认为浮点巧合）';
+      else if (!r.verified) check = '未取到可信残差，不评分';
       else if (r.parametric) check = '参数化拟合（含自由参数 α 或整系数多项式），非闭式';
+      else if (r.hpCheck && r.hpCheck.status === 'passed') check = '高精度复核通过（匹配约 ' + r.hpCheck.matchedDigits.toFixed(1) + ' 位）';
       else if (r.rel <= 1e-10) check = (isFinite(inputDigits) && inputDigits < 9.5)
         ? '匹配 ≥10 位，但数值本身仅 ' + inputDigits.toFixed(1) + ' 位，超出部分不计'
         : '匹配 ≥10 位，通过';
@@ -438,6 +788,13 @@
              '<td class="' + level + '">' + prob + '</td>' +
              '<td>' + esc(check) + '</td></tr>';
     }).join('');
+    if (riesDone) {
+      if (ranked.hasReliableClosed) {
+        setStatus('闭式搜索完成：已找到高置信度闭式候选（请优先核对「独立复核」列）。', 'ok');
+      } else {
+        setStatus('闭式搜索完成：未找到可靠闭式结果（等价积分变形与低置信度拟合不计为闭式），请以高精度数值结果为准。', 'warn');
+      }
+    }
   }
 
   // 节流而非防抖：RIES 增量重绘极频繁，纯防抖会让面板一直停在早期快照
@@ -556,22 +913,38 @@
     setStatus('已载入例题，点「计算并求闭式」运行。');
   }
 
-  el.run.addEventListener('click', solve);
-  el.f.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
-  el.exPlus.addEventListener('click', function () {
-    loadExample('abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))', '0', 'inf');
-  });
-  el.exMinus.addEventListener('click', function () {
-    loadExample('abs(sin(x))/(exp(x)-abs(sin(x)+cos(x)))', '0', 'inf');
-  });
-  el.exSimple.addEventListener('click', function () {
-    loadExample('exp(-x^2)', '-inf', 'inf');
-  });
+  var helpers = {
+    isIntegralOrSumForm: isIntegralOrSumForm,
+    isParametricForm: isParametricForm,
+    hpVerifyCandidate: hpVerifyCandidate,
+    guessProbability: guessProbability,
+    rankCandidates: rankCandidates
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = helpers;
+  if (isBrowser) {
+    window.IntegralGlueHelpers = helpers;
+    el.run.addEventListener('click', solve);
+    el.f.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
+    el.exPlus.addEventListener('click', function () {
+      loadExample('abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))', '0', 'inf');
+    });
+    el.exMinus.addEventListener('click', function () {
+      loadExample('abs(sin(x))/(exp(x)-abs(sin(x)+cos(x)))', '0', 'inf');
+    });
+    el.exSimple.addEventListener('click', function () {
+      loadExample('exp(-x^2)', '-inf', 'inf');
+    });
 
-  var body = $('resultBody');
-  if (body && window.MutationObserver) {
-    var obs = new MutationObserver(scheduleCandidateRender);
-    obs.observe(body, { childList: true, subtree: true, characterData: true });
+    var body = $('resultBody');
+    if (body && window.MutationObserver) {
+      var obs = new MutationObserver(scheduleCandidateRender);
+      obs.observe(body, { childList: true, subtree: true, characterData: true });
+    }
+    var stopBtnEl = $('stopBtn');
+    if (stopBtnEl && window.MutationObserver) {
+      var stopObs = new MutationObserver(scheduleCandidateRender);
+      stopObs.observe(stopBtnEl, { attributes: true, attributeFilter: ['disabled'] });
+    }
+    setStatus('就绪（积分层 v2.13）。支持 + - * / ^、abs/sin/cos/exp/log/sqrt/atanh/arctanh 等；变量只能写 x。');
   }
-  setStatus('就绪（积分层 v2.12）。支持 + - * / ^、abs/sin/cos/exp/log/sqrt 等；变量只能写 x。');
-})();
+})(typeof globalThis !== 'undefined' ? globalThis : this);

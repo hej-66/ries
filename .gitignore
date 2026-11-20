@@ -1,4 +1,5 @@
 .workbuddy-ai/
 .aistudio/
 node_modules/
+public/
 ries.zip

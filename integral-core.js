@@ -15,8 +15,11 @@
   var FUNCS = {
     sin: [Math.sin, 1], cos: [Math.cos, 1], tan: [Math.tan, 1],
     asin: [Math.asin, 1], acos: [Math.acos, 1], atan: [Math.atan, 1],
+    arcsin: [Math.asin, 1], arccos: [Math.acos, 1], arctan: [Math.atan, 1],
     sinh: [Math.sinh, 1], cosh: [Math.cosh, 1], tanh: [Math.tanh, 1],
     asinh: [Math.asinh, 1], acosh: [Math.acosh, 1], atanh: [Math.atanh, 1],
+    arcsinh: [Math.asinh, 1], arccosh: [Math.acosh, 1], arctanh: [Math.atanh, 1],
+    arsinh: [Math.asinh, 1], arcosh: [Math.acosh, 1], artanh: [Math.atanh, 1],
     exp: [Math.exp, 1], log: [Math.log, 1], ln: [Math.log, 1],
     log10: [Math.log10, 1], log2: [Math.log2, 1],
     sqrt: [Math.sqrt, 1], cbrt: [Math.cbrt, 1],

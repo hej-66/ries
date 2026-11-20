@@ -76,6 +76,12 @@
         var low = id.toLowerCase();
         if (low === 'ln') id = 'log';
         else if (low === 'pi') id = 'pi';
+        else if (low === 'arcsin') { id = 'asin'; low = 'asin'; }
+        else if (low === 'arccos') { id = 'acos'; low = 'acos'; }
+        else if (low === 'arctan') { id = 'atan'; low = 'atan'; }
+        else if (low === 'arcsinh' || low === 'arsinh') { id = 'asinh'; low = 'asinh'; }
+        else if (low === 'arccosh' || low === 'arcosh') { id = 'acosh'; low = 'acosh'; }
+        else if (low === 'arctanh' || low === 'artanh') { id = 'atanh'; low = 'atanh'; }
         ts.push({ t: 'id', v: id, low: low });
         i += m2[0].length;
         continue;

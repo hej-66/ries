@@ -255,7 +255,7 @@
         <div id="igResult" class="hp-panel" hidden><div id="igOut"></div></div>
         <div id="igCandidates" class="results-panel" hidden>
           <h2 class="compact-title">闭式候选</h2>
-          <p class="subtle-note">候选由原版 RIES 引擎给出；「引擎误差」直接取 RIES 结果表第三列。「推测概率」再叠加公式长度、项数、RIES 自带的「高度」与候选基规模做经验折减，不是数学证明。<b>含自由参数 α 或整系数多项式的「参数化拟合」不算闭式，单独列在表尾、不参与概率排序</b>，请优先看「独立复核」列。</p>
+          <p class="subtle-note">候选由原版 RIES 引擎给出；「引擎误差」直接取 RIES 结果表第三列。「推测概率」再叠加公式长度、项数、RIES 自带的「高度」与候选基规模做经验折减，不是数学证明。<b>等价积分/级数变形与含自由参数 α 或整系数多项式的「参数化拟合」均不算闭式，单独列在表尾、不参与闭式概率排序</b>，请优先看「独立复核」列。</p>
           <div class="table-wrap"><table class="ig-data"><thead><tr><th>候选表达式</th><th>引擎误差</th><th>推测概率</th><th>独立复核</th></tr></thead><tbody id="igCandBody"></tbody></table></div>
         </div>
       </div>
@@ -426,10 +426,10 @@
   </main>
   <script defer src="ries-script.js"></script>
   <script defer src="i18n.js"></script>
-  <script defer src="integral-hp.js?v=2.12"></script>
-  <script defer src="integral-core.js?v=2.12"></script>
-  <script defer src="integral-symbolic.js?v=2.12"></script>
-  <script defer src="integral-glue.js?v=2.12"></script>
+  <script defer src="integral-hp.js?v=2.13"></script>
+  <script defer src="integral-core.js?v=2.13"></script>
+  <script defer src="integral-symbolic.js?v=2.13"></script>
+  <script defer src="integral-glue.js?v=2.15"></script>
   <script>
     /* 内联兜底：外部 .js 全部 404 / 被拦截时（如手机上只打开单个 html、
        或浏览器禁止 file:// 读兄弟资源），defer 脚本不会执行，按钮会静默失效。
