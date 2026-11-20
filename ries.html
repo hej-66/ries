@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RIES v12.0.2 · cybcat</title>
+  <link rel="stylesheet" href="assets/site.css" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+  <style>
+    .solve-card { display:grid; gap:9px; }
+    .target-row { display:grid; grid-template-columns: minmax(0,1fr) auto; gap:8px; align-items:end; }
+    .target-row input { font-family: "Courier New", Courier, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: clamp(16px, 2vw, 22px); font-weight: 760; letter-spacing: -.01em; padding: 12px 14px; }
+    .target-actions { display:flex; gap:8px; align-items:end; }
+    .target-row .button { min-height: 46px; padding-inline:16px; }
+    .parameters-panel { border:1px solid var(--line); background:#fff; border-radius:20px; overflow:hidden; }
+    .parameters-panel[hidden] { display:none; }
+    #paramToggle[aria-expanded="true"] { border-color:rgba(14,116,144,.45); background:#f0f9ff; color:var(--accent); }
+    .advanced-body { padding:14px; display:grid; gap:12px; }
+    .param-block { border:1px solid var(--line); background:rgba(248,251,255,.86); border-radius:18px; padding:12px; display:grid; gap:9px; }
+    .param-block h3 { margin:0; font-size:15px; }
+    .symbol-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:10px; }
+    .symbol-box { border:1px solid var(--line); background:#fff; border-radius:16px; padding:11px; }
+    .symbol-box h4 { margin:0 0 8px; font-size: 14px; }
+
+    .module-block { border:1px solid var(--line); background:rgba(248,251,255,.86); border-radius:18px; padding:12px; display:grid; gap:10px; }
+    .module-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+    .module-title { display:grid; gap:2px; }
+    .module-title h3 { margin:0; font-size:15px; }
+    .module-title p { margin:0; color:var(--muted); font-size:12.5px; line-height:1.35; }
+    .module-body { display:grid; gap:10px; }
+    .module-body[hidden] { display:none; }
+    .module-block.is-disabled { background:rgba(248,250,252,.58); }
+    .module-block.is-disabled .module-title p { color:#94a3b8; }
+    .subtle-note { color:var(--muted); font-size:12.5px; line-height:1.45; margin:0; }
+    .status-line { margin-top: 0; padding:10px 13px; }
+    .command-preview { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:12px; line-height:1.45; overflow-wrap:anywhere; }
+    .results-panel { border:1px solid var(--line); background:rgba(255,255,255,.70); border-radius:20px; padding:14px; }
+    .compact-title { margin-bottom:8px; }
+    .compact-title h2 { font-size:clamp(16px,2vw,21px); }
+    .result-note { color:var(--muted); font-size:14px; line-height:1.6; margin:0; }
+    .download-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+    .download-card { text-decoration:none; border:1px solid var(--line); background:#fff; border-radius:18px; padding:14px; display:grid; gap:8px; box-shadow:0 8px 16px rgba(15,23,42,.05); }
+    .download-card:hover { border-color:rgba(14,116,144,.40); transform:translateY(-1px); }
+    .download-card strong { font-size:16px; }
+    .download-card span { color:var(--muted); font-size:13px; line-height:1.45; }
+    .mono-small { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; }
+    .option-groups { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .latex-render { font-size: 17px; line-height: 1.6; color:#0f172a; display:inline-block; max-width:100%; overflow-x:auto; overflow-y:visible; padding-bottom:2px; vertical-align:top; }
+    .latex-render mjx-container[jax="SVG"] { max-width:100%; overflow-x:auto; overflow-y:visible; }
+    .latex-render svg { max-width:none; overflow: visible; }
+    #stopBtn:not(:disabled) { border-color:rgba(220,38,38,.35); color:#b91c1c; background:#fff7f7; }
+    #continueBtn:not(:disabled) { border-color:rgba(14,116,144,.45); color:var(--accent); background:#f0f9ff; }
+    .status-line.searching { position:relative; overflow:hidden; isolation:isolate; border-color:rgba(14,116,144,.30); background:linear-gradient(100deg, rgba(240,249,255,.98), rgba(245,251,255,.98)); }
+    .status-line.searching::before, .status-line.searching::after { display:none; }
+
+    .content-card { height:auto; overflow:visible; overscroll-behavior:auto; scrollbar-gutter:auto; padding-top:14px; }
+    .hp-panel { border:1px solid rgba(14,116,144,.22); background:linear-gradient(135deg, rgba(240,249,255,.92), rgba(255,255,255,.88)); border-radius:20px; padding:12px; display:grid; gap:8px; box-shadow:0 12px 28px rgba(15,23,42,.05); }
+    .hp-panel[hidden] { display:none; }
+    .hp-panel.hp-error { border-color:rgba(220,38,38,.26); background:#fff7f7; }
+    .hp-meta { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:13px; }
+    .hp-value { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:clamp(14px,1.85vw,17px); line-height:1.78; word-break:break-all; overflow:visible; max-height:none; border:1px solid var(--line); border-radius:16px; background:#fff; padding:12px; }
+    .hp-value details, .tool-block details { margin-top:8px; }
+    .hp-value summary, .tool-block summary { cursor:pointer; color:var(--accent); font-family:inherit; }
+    .hp-error-line { color:#b91c1c; font-weight:700; }
+    .analysis-panel { border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.78); overflow:hidden; }
+    .analysis-panel[hidden] { display:none; }
+    .analysis-panel > summary { cursor:pointer; padding:12px 14px; font-weight:800; color:#0f172a; list-style:none; display:flex; justify-content:space-between; gap:10px; }
+    .analysis-panel > summary::after { content:'expand'; color:var(--muted); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; }
+    .analysis-panel[open] > summary::after { content:'collapse'; }
+    .number-tools-body { display:grid; gap:10px; padding:0 12px 12px; max-height:none; overflow:visible; }
+    .tool-block { border:1px solid var(--line); background:#fff; border-radius:16px; padding:10px; display:grid; gap:7px; }
+    .tool-block h3 { margin:0; font-size:15px; }
+    .base-table-wrap { overflow:auto; }
+    table.mini td:first-child { width:64px; font-weight:800; color:var(--accent); }
+    table.mini code, .tool-block code { white-space:pre-wrap; word-break:break-all; }
+    .stats-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+    .stat-card { border:1px solid var(--line); background:rgba(248,251,255,.86); border-radius:14px; padding:8px; }
+    .stat-card h4 { margin:0 0 8px; font-size:13px; color:#0f172a; }
+    .digit-stats { display:grid; gap:5px; }
+    .digit-count { display:grid; grid-template-columns:24px minmax(60px,1fr) 36px; gap:6px; align-items:center; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:12px; }
+    .digit-count b { display:block; height:7px; width:var(--w); border-radius:999px; background:linear-gradient(90deg, rgba(14,116,144,.24), rgba(124,58,237,.34)); }
+    .digit-count em { color:var(--muted); font-style:normal; text-align:right; }
+    .results-panel { max-height:none; overflow:visible; }
+
+    .sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
+    .solve-card.glass-card.content-card { background:transparent; border:0; box-shadow:none; backdrop-filter:none; padding-left:0; padding-right:0; }
+    .solve-card.glass-card.content-card::before { display:none; }
+    .results-panel { background:transparent; border:0; border-radius:0; padding:0; }
+    .table-wrap { overflow:auto; }
+
+    .ries-compact-hero { display:none; }
+    .ries-kicker { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; color:var(--muted); }
+    .brand-group { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+    .brand-group .ries-kicker { gap:8px; }
+    .ries-kicker span { color:var(--accent); text-transform:uppercase; letter-spacing:.18em; font-size:11px; font-weight:850; }
+    .ries-kicker strong { font-size:clamp(18px,2.2vw,24px); letter-spacing:-.035em; color:#0f172a; }
+    .ries-kicker em { font-style:normal; font-size:12px; color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+    table.data td { font-size:15.5px; line-height:1.62; min-width:0; max-width:100%; }
+    table.data code { font-size:14.5px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .copy-btn { margin-left:8px; vertical-align:middle; border:1px solid rgba(14,116,144,.22); background:#f8fcff; color:var(--accent); border-radius:999px; padding:3px 8px; font-size:11px; font-weight:800; letter-spacing:.02em; cursor:pointer; box-shadow:none; }
+    .copy-btn:hover { background:#ecfeff; border-color:rgba(14,116,144,.45); }
+    .copy-btn.copied { color:#15803d; border-color:rgba(21,128,61,.30); background:#f0fdf4; }
+
+    .result-tools { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin:0 0 8px; padding:8px 10px; border:1px solid rgba(14,116,144,.16); border-radius:16px; background:rgba(248,252,255,.78); }
+    .result-tools[hidden] { display:none; }
+    .result-tools .button { padding:7px 11px; font-size:12px; min-height:0; box-shadow:none; }
+    .solve-card .controls { gap:10px; }
+    .solve-card .option-row { gap:7px; margin:8px 0 0; }
+    .result-value-stack { display:grid; gap:8px; min-width:0; }
+    .result-value-main { overflow-wrap:anywhere; }
+    .result-meta-block { border-top:1px dashed rgba(148,163,184,.45); padding-top:7px; display:grid; gap:6px; min-width:0; max-width:100%; }
+    .result-meta-label { display:inline-block; min-width:82px; color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; vertical-align:top; }
+    .result-meta-line { min-width:0; max-width:100%; overflow:hidden; overflow:visible; overflow-wrap:anywhere; display:grid; grid-template-columns:minmax(82px,max-content) minmax(0,1fr) auto; gap:6px 8px; align-items:start; }
+    .result-meta-line .latex-render { max-width:100%; min-width:0; display:block; }
+    .result-meta-line code { white-space:normal; overflow-wrap:anywhere; }
+    .q-expansion-render { font-size:20px; line-height:1.85; display:block; overflow-x:auto; padding-bottom:2px; max-width:100%; }
+    .q-expansion-render svg { max-width:100%; min-width:360px; }
+    .parameter-actions-head { align-items:center; gap:12px; }
+    .param-action-row { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .param-action-row .button { padding:7px 11px; font-size:12px; min-height:0; box-shadow:none; }
+    .copy-row { margin-top:8px; text-align:right; }
+    .harddb-explain { margin-top:8px; border-top:1px dashed rgba(148,163,184,.45); padding-top:7px; display:grid; gap:5px; color:#334155; font-size:13px; line-height:1.55; }
+    .harddb-explain b { color:#0f172a; }
+    .hp-value details code, .tool-block details code { font-size:15px; line-height:1.78; display:block; padding-top:8px; }
+    .status-line.searching.rich-search { padding:11px 14px; min-height:88px; background:linear-gradient(100deg, rgba(240,249,255,.98), rgba(245,251,255,.98)); background-size:100% 100%; }
+    .status-line.searching.rich-search::before, .status-line.searching.rich-search::after { display:none; }
+    .search-status-grid { display:grid; grid-template-columns:minmax(0,1fr) 96px; gap:16px; align-items:center; position:relative; z-index:1; }
+    .search-status-main { display:grid; gap:6px; min-width:0; }
+    .search-status-main strong { text-transform:uppercase; letter-spacing:.12em; font-size:11px; color:var(--accent); }
+    .search-status-main span { font-size:13.5px; color:#075985; overflow-wrap:anywhere; }
+    .search-progress-wrap { display:grid; grid-template-columns:minmax(0,1fr) 42px; gap:9px; align-items:center; }
+    .search-progress-label { font-size:11px; color:#0e7490; text-align:right; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+    .search-progress { height:9px; border-radius:999px; overflow:hidden; border:1px solid rgba(14,116,144,.20); background:rgba(255,255,255,.78); contain:paint; }
+    .search-progress i { display:block; width:var(--progress,6%); height:100%; border-radius:inherit; background:linear-gradient(90deg, rgba(14,116,144,.84), rgba(37,99,235,.70), rgba(124,58,237,.66)); box-shadow:none; transition:width .72s cubic-bezier(.16,.84,.26,1); transform:translateZ(0); }
+    .tesseract-widget { width:104px; height:104px; border:1px solid rgba(14,116,144,.13); border-radius:18px; background:radial-gradient(circle at 35% 25%, rgba(255,255,255,.86), rgba(240,249,255,.52)); display:grid; place-items:center; overflow:hidden; contain:layout paint; flex:0 0 auto; }
+    .geometry-stage { position:relative; width:112px; height:112px; display:grid; place-items:center; }
+    .tesseract-canvas { display:block; width:112px; height:112px; max-width:112px; max-height:112px; }
+
+    @media(max-width:980px){ .symbol-grid, .option-groups { grid-template-columns: 1fr; } .search-status-grid{ grid-template-columns:minmax(0,1fr) 86px; gap:10px; } .tesseract-widget{ width:86px; height:86px; } .geometry-stage,.tesseract-canvas{ width:86px!important; height:86px!important; } }
+    @media(max-width:640px){
+      html, body { min-width:0; overflow-x:hidden; }
+      body { background:linear-gradient(145deg, rgba(248,245,255,.98) 0%, rgba(241,249,255,.98) 48%, rgba(238,244,251,.98) 100%); background-attachment:fixed; background-size:cover; }
+      main, .content-card, .container, .navbar, .hero, .solve-card { max-width:100%; width:100%; }
+      .navbar { align-items:stretch; }
+      .navbar .brand, .navbar .navlinks { width:100%; }
+      .navbar .navlinks { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .navbar .navlinks a { text-align:center; background:rgba(255,255,255,.72); border-color:rgba(219,229,241,.80); }
+      .content-card { height:auto; padding:10px; border-radius:18px; }
+      .ries-compact-hero { padding-top:8px!important; }
+      .ries-kicker { gap:6px; }
+      .ries-kicker strong { font-size:18px; }
+      .ries-kicker em { font-size:11px; }
+      .solve-card { gap:9px; }
+      .target-row { grid-template-columns:1fr; gap:8px; }
+      .target-row input { min-width:0; width:100%; font-size:16px; padding:10px 11px; }
+      .target-actions { display:grid; grid-template-columns:1fr 1fr; align-items:stretch; gap:8px; }
+      .target-actions .button { width:100%; padding-inline:8px; min-width:0; }
+      .download-grid, .stats-grid { grid-template-columns: 1fr; }
+      .advanced-body { padding:9px; gap:10px; }
+      .param-block { padding:10px; border-radius:14px; }
+      .controls { grid-template-columns:1fr !important; }
+      .option-row { gap:6px; }
+      .option-chip { min-width:0; }
+      .hp-value { max-height:none; font-size:13px; }
+      .results-panel, .number-tools-body { max-height:none; padding:10px; }
+      .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+      table.data { min-width:560px; }
+      table.data td { font-size:13.5px; }
+      table.data code { font-size:13px; }
+      .copy-btn { padding:3px 7px; margin-left:5px; }
+      .status-line.searching.rich-search { min-height:0; padding:10px; }
+      .search-status-grid { grid-template-columns:1fr; }
+      .search-status-main span { font-size:12.5px; }
+      .search-progress-wrap { grid-template-columns:minmax(0,1fr) 38px; }
+      .tesseract-widget { width:74px; height:74px; justify-self:center; }
+      .geometry-stage,.tesseract-canvas { width:74px!important; height:74px!important; }
+    }
+  </style>
+
+  <script>
+    window.MathJax = {
+      tex: { inlineMath: [['\\(','\\)'], ['$', '$']], displayMath: [['\\[','\\]']] },
+      svg: { fontCache: 'global' },
+      options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }
+    };
+  </script>
+  <script defer src="assets/decimal.js"></script>
+  <script defer src="assets/lfunctions-l2l4.js"></script>
+  <script defer src="assets/constantdb300.js"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+<body>
+  <main class="page-shell">
+    <section class="solve-card glass-card content-card">
+      <div class="target-row">
+        <div><label for="target" class="sr-only">Target</label><input id="target" value="" placeholder="Enter a number or computable expression" inputmode="decimal" autocomplete="off" aria-label="Target expression"></div>
+        <div class="target-actions">
+          <button class="button" id="paramToggle" type="button" aria-expanded="false" aria-controls="parametersPanel">Parameters</button>
+          <button class="button primary" id="runBtn" type="button">Solve</button>
+          <button class="button" id="stopBtn" type="button" disabled>Stop</button>
+          <button class="button" id="continueBtn" type="button" disabled>Continue higher</button>
+        </div>
+      </div>
+      <div id="status" class="notice status-line">Ready.</div>
+      <section class="hp-panel" id="hpPanel" hidden>
+        <div class="section-title compact-title"><h2>High-precision value</h2><p>Computed expression values are displayed here, separately from RIES candidates.</p></div>
+        <div id="hpContent"></div>
+      </section>
+      <details class="analysis-panel" id="numberTools" hidden>
+        <summary>Continued fraction, base expansions, and digit statistics</summary>
+        <div class="number-tools-body" id="numberToolsContent"></div>
+      </details>
+      <div class="results-panel">
+        <div class="section-title compact-title"><h2>Results</h2></div>
+        <div id="resultTools" class="result-tools" hidden><span id="resultToolsMeta" class="muted">Results ready.</span><button class="button" id="sortConfidenceBtn" type="button">Sort by confidence</button><button class="button" id="sortDiscoveryBtn" type="button" hidden>Original order</button></div>
+        <div class="table-wrap"><table class="data"><thead><tr><th>candidate</th><th>value / root</th><th>error</th></tr></thead><tbody id="resultBody"></tbody></table></div>
+      </div>
+      <div class="parameters-panel" id="parametersPanel" hidden>
+        <div class="advanced-body">
+          <div class="param-block">
+            <div class="module-head parameter-actions-head"><div class="module-title"><h3>Search depth and display</h3></div><div class="param-action-row" aria-label="Module master switches"><button class="button" id="modulesAllOn" type="button">All modules on</button><button class="button" id="modulesAllOff" type="button">All modules off</button><button class="button" id="modulesDefaults" type="button">Restore default modules</button></div></div>
+            <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));">
+              <div><label for="limit">Displayed candidates per module</label><input id="limit" type="number" min="1" max="50" value="5" title="Maximum candidate rows kept or displayed by most modules."></div>
+              <div><label for="level">Depth</label><select id="level" title="Displayed as depth 1,2,3…; internally this maps to the current RIES levels."><option value="1">depth 1</option><option value="2">depth 2</option><option value="3">depth 3</option><option value="4" selected>depth 4</option><option value="5">depth 5</option><option value="6">depth 6</option><option value="7">depth 7</option><option value="8">depth 8</option><option value="9">depth 9</option></select></div>
+              <div><label for="maxAbs">Max |value|</label><input id="maxAbs" value="1e9" title="Discard generated intermediate expressions whose absolute value is too large."></div>
+              <div><label for="maxRelError">Max relative error</label><input id="maxRelError" value="Infinity" title="Optional final filter on relative error. Leave as Infinity for default behavior."></div>
+            </div>
+            <p class="muted">Stage time limits are active search budgets after any lazy database package has loaded. Enter <code>0</code> to remove that module's internal time deadline. Depth-specific database modules show separate budgets for each depth tier.</p>
+          </div>
+
+          <div class="module-block" data-module-block="moduleRiesEq">
+            <div class="module-head"><div class="module-title"><h3>RIES equation roots</h3><p>Builds unary/binary expressions from digits and constants, then solves equations around the target.</p></div><label class="option-chip"><input type="checkbox" id="moduleRiesEq" checked data-module-toggle="moduleRiesEq"> on</label></div>
+            <div class="module-body" data-module-body="moduleRiesEq">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));">
+                <div><label for="digits">Digits</label><input id="digits" value="0123456789"></div>
+                <div><label for="restrictMode">Restriction</label><select id="restrictMode"><option value="none" selected>unrestricted</option><option value="rational">rational-style</option><option value="constructible">constructible-style</option><option value="integer">integer output</option></select></div>
+                <div><label for="onlySyms">Only symbols, -S</label><input id="onlySyms" placeholder="123456789+-*/qsp"></div>
+                <div><label for="neverSyms">Never symbols, -N</label><input id="neverSyms" placeholder="lLESTC"></div>
+              </div>
+              <div class="controls" style="grid-template-columns: repeat(2,minmax(0,1fr));">
+                <div><label for="riesLimit">Candidate rows</label><input id="riesLimit" type="number" min="1" max="50" value="5" title="Rows kept for this module; default keeps the current default behavior."></div>
+                <div><label for="riesBudgetMs">Stage time limit (ms)</label><input id="riesBudgetMs" type="number" min="0" max="120000" value="8000" data-auto-depth-budget="1" title="Active RIES expression/root search budget for the current depth; 0 means no internal deadline."></div>
+              </div>
+              <div class="symbol-grid">
+                <div class="symbol-box"><h4>Constants</h4><div class="option-row"><label class="option-chip"><input type="checkbox" data-sym="p" checked> π</label><label class="option-chip"><input type="checkbox" data-sym="e" checked> e</label><label class="option-chip"><input type="checkbox" data-sym="f" checked> φ</label></div></div>
+                <div class="symbol-box"><h4>Unary operations</h4><div class="option-row"><label class="option-chip"><input type="checkbox" data-sym="n" checked> neg</label><label class="option-chip"><input type="checkbox" data-sym="r" checked> reciprocal</label><label class="option-chip"><input type="checkbox" data-sym="s" checked> square</label><label class="option-chip"><input type="checkbox" data-sym="q" checked> sqrt</label><label class="option-chip"><input type="checkbox" data-sym="l" checked> ln</label><label class="option-chip"><input type="checkbox" data-sym="E" checked> exp</label><label class="option-chip"><input type="checkbox" data-sym="S" checked> sin(πx)</label><label class="option-chip"><input type="checkbox" data-sym="C" checked> cos(πx)</label><label class="option-chip"><input type="checkbox" data-sym="T" checked> tan(πx)</label></div></div>
+                <div class="symbol-box"><h4>Binary operations</h4><div class="option-row"><label class="option-chip"><input type="checkbox" data-sym="+" checked> +</label><label class="option-chip"><input type="checkbox" data-sym="-" checked> −</label><label class="option-chip"><input type="checkbox" data-sym="*" checked> ×</label><label class="option-chip"><input type="checkbox" data-sym="/" checked> ÷</label><label class="option-chip"><input type="checkbox" data-sym="^" checked> power</label><label class="option-chip"><input type="checkbox" data-sym="v" checked> root</label><label class="option-chip"><input type="checkbox" data-sym="L" checked> log base</label></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleAlgebraic">
+            <div class="module-head"><div class="module-title"><h3>Algebraic polynomial relation</h3><p>Uses integer relation reconstruction for direct decimal inputs; precision controls remain internal.</p></div><label class="option-chip"><input type="checkbox" id="moduleAlgebraic" checked data-module-toggle="moduleAlgebraic"> on</label></div>
+            <div class="module-body" data-module-body="moduleAlgebraic">
+              <div class="controls" style="grid-template-columns: repeat(2,minmax(0,1fr));">
+                <div><label for="algDegree">Max degree</label><input id="algDegree" type="number" min="1" max="14" value="10"></div>
+                <div><label for="algHeight">Max coefficient height</label><input id="algHeight" value="1000000000000"></div>
+                <div><label for="algLimit">Candidate rows</label><input id="algLimit" type="number" min="1" max="50" value="5"></div>
+                <div><label for="algBudgetMs">Stage time limit (ms)</label><input id="algBudgetMs" type="number" min="0" max="120000" value="3600"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleLog">
+            <div class="module-head"><div class="module-title"><h3>Log-combination relation</h3><p>Searches sparse linear relations among selected logarithmic or raw constants.</p></div><label class="option-chip"><input type="checkbox" id="moduleLog" checked data-module-toggle="moduleLog"> on</label></div>
+            <div class="module-body" data-module-body="moduleLog">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));">
+                <div><label for="logHeight">Max coefficient</label><input id="logHeight" value="400"></div>
+                <div><label for="logLimit">Candidate rows</label><input id="logLimit" type="number" min="1" max="50" value="5"></div>
+                <div><label for="logBudgetMs">Stage time limit (ms)</label><input id="logBudgetMs" type="number" min="0" max="120000" value="8000" data-auto-depth-budget="1"></div>
+              </div>
+              <div class="symbol-box"><h4>Target transforms</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="logTargetLogAbs" checked> log|x|</label><label class="option-chip"><input type="checkbox" id="logTargetRaw" checked> x</label><label class="option-chip"><input type="checkbox" id="logTargetLogLogAbs" checked> log|log|x||</label></div></div>
+              <div class="option-groups">
+                <div class="symbol-box"><h4>Default basis</h4><div class="option-row" id="defaultLogBasis"></div></div>
+                <div class="symbol-box"><h4>Optional candidates</h4><div class="option-row" id="extraLogBasis"></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleLinearCombo">
+            <div class="module-head"><div class="module-title"><h3>Low-precision linear combo</h3><p>Looks for one-, two-, and three-term rational combinations of the low-precision constant basis.</p></div><label class="option-chip"><input type="checkbox" id="moduleLinearCombo" checked data-module-toggle="moduleLinearCombo"> on</label></div>
+            <div class="module-body" data-module-body="moduleLinearCombo">
+              <div class="controls" style="grid-template-columns: repeat(2,minmax(0,1fr));"><div><label for="linearComboLimit">Candidate rows</label><input id="linearComboLimit" type="number" min="1" max="50" value="5"></div><div><label for="linearComboBudgetMs">Stage time limit (ms)</label><input id="linearComboBudgetMs" type="number" min="0" max="120000" value="3000"></div></div>
+              <div class="option-row"><label class="option-chip"><input type="checkbox" id="linearCombo1Term" checked> 1-term scan</label><label class="option-chip"><input type="checkbox" id="linearCombo2Term" checked> 2-term exhaustive scan</label><label class="option-chip"><input type="checkbox" id="linearCombo3Term" checked> 3-term prioritized scan</label></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleMobius">
+            <div class="module-head"><div class="module-title"><h3>Möbius constant relations</h3><p>Checks fractional-linear relations in selected constants, including direct, log|x|, and exp(x) variants.</p></div><label class="option-chip"><input type="checkbox" id="moduleMobius" checked data-module-toggle="moduleMobius"> on</label></div>
+            <div class="module-body" data-module-body="moduleMobius">
+              <div class="controls" style="grid-template-columns: repeat(2,minmax(0,1fr));"><div><label for="mobiusLimit">Candidate rows</label><input id="mobiusLimit" type="number" min="1" max="50" value="5"></div><div><label for="mobiusBudgetMs">Stage time limit (ms)</label><input id="mobiusBudgetMs" type="number" min="0" max="120000" value="8000" data-auto-depth-budget="1"></div></div>
+              <div class="option-row"><label class="option-chip"><input type="checkbox" id="mobiusDirect" checked> direct x</label><label class="option-chip"><input type="checkbox" id="mobiusLogAbs" checked> log|x|</label><label class="option-chip"><input type="checkbox" id="mobiusExp" checked> exp(x)</label><label class="option-chip"><input type="checkbox" id="mobiusTriple" checked> depth>4 triple basis</label></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleConstantDb">
+            <div class="module-head"><div class="module-title"><h3>Constant database</h3><p>Compares x and selected transforms with the 300-entry constant database by rational, algebraic, Möbius, and log-linear passes.</p></div><label class="option-chip"><input type="checkbox" id="moduleConstantDb" checked data-module-toggle="moduleConstantDb"> on</label></div>
+            <div class="module-body" data-module-body="moduleConstantDb">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));"><div><label for="constantDbLimit">Candidate rows</label><input id="constantDbLimit" type="number" min="1" max="50" value="5"></div><div><label for="constantDb4BudgetMs">depth 4 time limit (ms)</label><input id="constantDb4BudgetMs" type="number" min="0" max="300000" value="20000"></div><div><label for="constantDb5BudgetMs">depth 5 time limit (ms)</label><input id="constantDb5BudgetMs" type="number" min="0" max="300000" value="45000"></div><div><label for="constantDb6BudgetMs">depth 6 time limit (ms)</label><input id="constantDb6BudgetMs" type="number" min="0" max="600000" value="135000"></div></div>
+              <div class="option-groups">
+                <div class="symbol-box"><h4>Depth transforms</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="cdbTransX" checked> x</label><label class="option-chip"><input type="checkbox" id="cdbTransExp" checked> exp(x)</label><label class="option-chip"><input type="checkbox" id="cdbTransLog" checked> log(x)</label><label class="option-chip"><input type="checkbox" id="cdbTransInv" checked> 1/x</label><label class="option-chip"><input type="checkbox" id="cdbTransSquare" checked> x²</label></div></div>
+                <div class="symbol-box"><h4>Relation passes</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="cdbPassRational" checked> rational b/c</label><label class="option-chip"><input type="checkbox" id="cdbPassAffine" checked> affine in c</label><label class="option-chip"><input type="checkbox" id="cdbPassQuadratic" checked> quadratic/reciprocal</label><label class="option-chip"><input type="checkbox" id="cdbPassMobius" checked> Möbius pass</label><label class="option-chip"><input type="checkbox" id="cdbPassAlgebraic" checked> higher algebraic</label><label class="option-chip"><input type="checkbox" id="cdbPassLog" checked> log-linear/subset</label></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleHardDb">
+            <div class="module-head"><div class="module-title"><h3>Hard constant database</h3><p>Loads the pruned harddb once at depth 4; depths 5/6 reuse the same rows with richer comparison constants.</p></div><label class="option-chip"><input type="checkbox" id="moduleHardDb" checked data-module-toggle="moduleHardDb"> on</label></div>
+            <div class="module-body" data-module-body="moduleHardDb">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));"><div><label for="hardDbLimit">Candidate rows</label><input id="hardDbLimit" type="number" min="1" max="50" value="5"></div><div><label for="hardDb4BudgetMs">depth 4 time limit (ms)</label><input id="hardDb4BudgetMs" type="number" min="0" max="120000" value="3000" title="Depth 4 scans all remaining harddb rows with simple comparison constants; 0 means no internal deadline."></div><div><label for="hardDb5BudgetMs">depth 5 time limit (ms)</label><input id="hardDb5BudgetMs" type="number" min="0" max="120000" value="15000" title="Depth 5 scans the same rows with core comparison constants; 0 means no internal deadline."></div><div><label for="hardDb6BudgetMs">depth 6 time limit (ms)</label><input id="hardDb6BudgetMs" type="number" min="0" max="300000" value="50000" title="Depth 6 scans the same rows with extended comparison constants; 0 means no internal deadline."></div><div><label for="hardDbRationalHeight">Rational multiplier height</label><input id="hardDbRationalHeight" type="number" min="1" max="80" value="20"></div><div><label for="hardDbMaxParamHeight">Max stored parameter height</label><input id="hardDbMaxParamHeight" type="number" min="1" max="200" value="15"></div></div>
+              <div class="option-groups"><div class="symbol-box"><h4>Database depths</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="hardDbDepth4" checked> depth 4: full rows/simple constants</label><label class="option-chip"><input type="checkbox" id="hardDbDepth5" checked> depth 5: core constants</label><label class="option-chip"><input type="checkbox" id="hardDbDepth6" checked> depth 6: extended constants</label></div></div><div class="symbol-box"><h4>Relation passes</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="hardDbPassRational" checked> rational · |A|</label><label class="option-chip"><input type="checkbox" id="hardDbPassPower" checked> power law</label><label class="option-chip"><input type="checkbox" id="hardDbPassExponential" checked> exponential law</label><label class="option-chip"><input type="checkbox" id="hardDbPassLogScale" checked> log-scale law</label></div></div></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleHypData">
+            <div class="module-head"><div class="module-title"><h3>Hypergeometric pFq database</h3><p>Lazy-loads cumulative depth 4/5/6 pFq chunks and compares H with multiplier families.</p></div><label class="option-chip"><input type="checkbox" id="moduleHypData" checked data-module-toggle="moduleHypData"> on</label></div>
+            <div class="module-body" data-module-body="moduleHypData">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));"><div><label for="hypDataLimit">Candidate rows</label><input id="hypDataLimit" type="number" min="1" max="50" value="5"></div><div><label for="hypData1BudgetMs">depth 4 time limit (ms)</label><input id="hypData1BudgetMs" type="number" min="0" max="120000" value="3000"></div><div><label for="hypData2BudgetMs">depth 5 time limit (ms)</label><input id="hypData2BudgetMs" type="number" min="0" max="120000" value="15000"></div><div><label for="hypData3BudgetMs">depth 6 time limit (ms)</label><input id="hypData3BudgetMs" type="number" min="0" max="300000" value="50000"></div></div>
+              <div class="option-groups">
+                <div class="symbol-box"><h4>Database depths</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="hypDepth1" checked> depth 4: 2F1/3F2</label><label class="option-chip"><input type="checkbox" id="hypDepth2" checked> depth 5: 4F3/5F4</label><label class="option-chip"><input type="checkbox" id="hypDepth3" checked> depth 6: full pFq</label></div></div>
+                <div class="symbol-box"><h4>Multiplier families</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="hypMultSimple" checked> simple rational/π/root</label><label class="option-chip"><input type="checkbox" id="hypMultGamma" checked> core Gamma</label><label class="option-chip"><input type="checkbox" id="hypMultDeep" checked> deep/extended</label></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleIntsumDb">
+            <div class="module-head"><div class="module-title"><h3>Integral/sum database</h3><p>Lazy-loads integral and series identities: depth 4 uses the simplest low-height rows, while depths 5/6 use the full table with richer multiplier families.</p></div><label class="option-chip"><input type="checkbox" id="moduleIntsumDb" checked data-module-toggle="moduleIntsumDb"> on</label></div>
+            <div class="module-body" data-module-body="moduleIntsumDb">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));"><div><label for="intsumDbLimit">Candidate rows</label><input id="intsumDbLimit" type="number" min="1" max="50" value="5"></div><div><label for="intsumDb1BudgetMs">depth 4 time limit (ms)</label><input id="intsumDb1BudgetMs" type="number" min="0" max="120000" value="3000"></div><div><label for="intsumDb2BudgetMs">depth 5 time limit (ms)</label><input id="intsumDb2BudgetMs" type="number" min="0" max="120000" value="15000"></div><div><label for="intsumDb3BudgetMs">depth 6 time limit (ms)</label><input id="intsumDb3BudgetMs" type="number" min="0" max="300000" value="50000"></div></div>
+              <div class="option-groups">
+                <div class="symbol-box"><h4>Database depths</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="intsumDepth1" checked> depth 4: simple 1/5</label><label class="option-chip"><input type="checkbox" id="intsumDepth2" checked> depth 5: full data</label><label class="option-chip"><input type="checkbox" id="intsumDepth3" checked> depth 6: deep multipliers</label></div></div>
+                <div class="symbol-box"><h4>Multiplier families</h4><div class="option-row"><label class="option-chip"><input type="checkbox" id="intsumMultSimple" checked> simple rational/π/root</label><label class="option-chip"><input type="checkbox" id="intsumMultGamma" checked> core Gamma</label><label class="option-chip"><input type="checkbox" id="intsumMultDeep" checked> deep/extended</label></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleLfunc">
+            <div class="module-head"><div class="module-title"><h3>L-function database</h3><p>Compares decimal inputs against L(f,s) rational, quadratic, and logarithmic catalogued forms.</p></div><label class="option-chip"><input type="checkbox" id="moduleLfunc" checked data-module-toggle="moduleLfunc"> on</label></div>
+            <div class="module-body" data-module-body="moduleLfunc">
+              <div class="controls" style="grid-template-columns: repeat(2,minmax(0,1fr));"><div><label for="lfuncLimit">Candidate rows</label><input id="lfuncLimit" type="number" min="1" max="50" value="5"></div><div><label for="lfuncBudgetMs">Stage time limit (ms)</label><input id="lfuncBudgetMs" type="number" min="0" max="120000" value="8000" data-auto-depth-budget="1"></div></div>
+              <div class="option-row"><label class="option-chip"><input type="checkbox" id="lfuncRational" checked> rational forms</label><label class="option-chip"><input type="checkbox" id="lfuncQuadratic" checked> quadratic forms</label><label class="option-chip"><input type="checkbox" id="lfuncLog" checked> log forms</label><label class="option-chip"><input type="checkbox" id="specialConstants" checked> special decimal constants</label></div>
+            </div>
+          </div>
+
+          <div class="module-block" data-module-block="moduleInteger">
+            <div class="module-head"><div class="module-title"><h3>Integer search</h3><p>For exact integer input: factorization, structured/precomputed database, and deterministic shortform search.</p></div><label class="option-chip"><input type="checkbox" id="moduleInteger" checked data-module-toggle="moduleInteger"> on</label></div>
+            <div class="module-body" data-module-body="moduleInteger">
+              <div class="controls" style="grid-template-columns: repeat(4,minmax(0,1fr));"><div><label for="shortEffort">Integer shortform effort</label><select id="shortEffort"><option value="0">0 · ~1 s</option><option value="1">1 · ~2 s</option><option value="2">2 · ~4 s</option><option value="3" selected>3 · ~8 s</option><option value="4">4 · ~16 s</option><option value="5">5 · ~32 s</option><option value="6">6 · ~64 s</option><option value="7">7 · ~128 s</option></select></div><div><label for="integerLimit">Candidate rows</label><input id="integerLimit" type="number" min="1" max="50" value="5"></div><div><label for="integerFactorBudgetMs">Factorization time override (ms)</label><input id="integerFactorBudgetMs" type="number" min="0" max="300000" value="0" title="0 keeps the automatic integer-size-based default."></div></div>
+              <div class="option-row"><label class="option-chip"><input type="checkbox" id="integerFactor" checked> factorization</label><label class="option-chip"><input type="checkbox" id="integerDb" checked> structured/precomputed database</label><label class="option-chip"><input type="checkbox" id="integerShortform" checked> deterministic shortform</label><label class="option-chip"><input type="checkbox" id="integerAllowExternalFactorization"> allow external/worker QS or ECM handoff</label></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <footer class="footer"><span>RIES 12.0.2</span><a class="pill-link" href="../index.html">Home</a></footer>
+  </main>
+  <script defer src="ries-script.js"></script>
+
+</body>
+</html>

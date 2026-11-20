@@ -1,0 +1,295 @@
+/* integral-core.js — 定积分数值层（纯 JS，无外部依赖）
+ * 提供：表达式编译、奇点/发散预检、自适应 Simpson 求积、启发式误差界。
+ * 离线可用；UMD 风格，Node 下可直接 require 做测试。
+ */
+(function (global) {
+  'use strict';
+
+  var CONSTS = {
+    pi: Math.PI, 'π': Math.PI, e: Math.E, tau: 2 * Math.PI,
+    phi: (1 + Math.sqrt(5)) / 2, inf: Infinity, infinity: Infinity,
+    ln2: Math.LN2, ln10: Math.LN10
+  };
+
+  var FUNCS = {
+    sin: [Math.sin, 1], cos: [Math.cos, 1], tan: [Math.tan, 1],
+    asin: [Math.asin, 1], acos: [Math.acos, 1], atan: [Math.atan, 1],
+    sinh: [Math.sinh, 1], cosh: [Math.cosh, 1], tanh: [Math.tanh, 1],
+    exp: [Math.exp, 1], log: [Math.log, 1], ln: [Math.log, 1],
+    log10: [Math.log10, 1], log2: [Math.log2, 1], sqrt: [Math.sqrt, 1],
+    abs: [Math.abs, 1], sign: [Math.sign, 1], floor: [Math.floor, 1],
+    ceil: [Math.ceil, 1], round: [Math.round, 1],
+    min: [Math.min, 2], max: [Math.max, 2], pow: [Math.pow, 2],
+    atan2: [Math.atan2, 2], hypot: [Math.hypot, 2]
+  };
+
+  function tokenize(src) {
+    var out = [], i = 0, s = String(src).replace(/\s+/g, '');
+    while (i < s.length) {
+      var c = s[i];
+      if (/[0-9.]/.test(c)) {
+        var m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s.slice(i));
+        if (!m) throw new Error('无法解析的数字：' + s.slice(i, i + 12));
+        out.push({ t: 'num', v: parseFloat(m[0]) }); i += m[0].length; continue;
+      }
+      if (/[a-zA-Zπ∞_]/.test(c)) {
+        var m2 = /^[a-zA-Zπ∞_][a-zA-Z0-9π∞_]*/ .exec(s.slice(i));
+        out.push({ t: 'id', v: m2[0].toLowerCase() }); i += m2[0].length; continue;
+      }
+      if ('+-*/^'.indexOf(c) >= 0) { out.push({ t: 'op', v: c }); i++; continue; }
+      if (c === '(') { out.push({ t: 'lp' }); i++; continue; }
+      if (c === ')') { out.push({ t: 'rp' }); i++; continue; }
+      if (c === ',') { out.push({ t: 'comma' }); i++; continue; }
+      throw new Error('非法字符：' + c);
+    }
+    return out;
+  }
+
+  function compile(src) {
+    var ts = tokenize(src), pos = 0;
+    function peek() { return ts[pos]; }
+    function eat(t) { var k = ts[pos]; if (!k || k.t !== t) throw new Error('表达式语法错误，位置 ' + pos); pos++; return k; }
+
+    function primary() {
+      var k = peek();
+      if (!k) throw new Error('表达式意外结束');
+      if (k.t === 'num') { pos++; var v = k.v; return function () { return v; }; }
+      if (k.t === 'lp') { pos++; var e = expr(); eat('rp'); return e; }
+      if (k.t === 'op' && (k.v === '+' || k.v === '-')) {
+        pos++; var inner = primary();
+        return k.v === '-' ? function (x) { return -inner(x); } : inner;
+      }
+      if (k.t === 'id') {
+        pos++; var name = k.v;
+        if (peek() && peek().t === 'lp') {
+          pos++;
+          var args = [];
+          if (!peek() || peek().t !== 'rp') { args.push(expr()); while (peek() && peek().t === 'comma') { pos++; args.push(expr()); } }
+          eat('rp');
+          var spec = FUNCS[name];
+          if (!spec) throw new Error('未知函数：' + name);
+          if (args.length !== spec[1]) throw new Error(name + ' 需要 ' + spec[1] + ' 个参数');
+          var fn = spec[0];
+          return function (x) { return fn.apply(null, args.map(function (a) { return a(x); })); };
+        }
+        if (name === 'x') return function (x) { return x; };
+        if (Object.prototype.hasOwnProperty.call(CONSTS, name)) {
+          var cv = CONSTS[name]; return function () { return cv; };
+        }
+        throw new Error('未知标识符：' + name + '（变量只能用 x）');
+      }
+      throw new Error('表达式语法错误，位置 ' + pos);
+    }
+    function power() {
+      var base = primary();
+      if (peek() && peek().t === 'op' && peek().v === '^') {
+        pos++; var ex = unary();
+        return function (x) { return Math.pow(base(x), ex(x)); };
+      }
+      return base;
+    }
+    function unary() {
+      var k = peek();
+      if (k && k.t === 'op' && (k.v === '+' || k.v === '-')) {
+        pos++; var inner = unary();
+        return k.v === '-' ? function (x) { return -inner(x); } : inner;
+      }
+      return power();
+    }
+    function term() {
+      var left = unary();
+      while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
+        var op = ts[pos++].v, right = unary(), L = left;
+        left = op === '*' ? function (x) { return L(x) * right(x); }
+                         : function (x) { return L(x) / right(x); };
+      }
+      return left;
+    }
+    function expr() {
+      var left = term();
+      while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+        var op = ts[pos++].v, right = term(), L = left;
+        left = op === '+' ? function (x) { return L(x) + right(x); }
+                         : function (x) { return L(x) - right(x); };
+      }
+      return left;
+    }
+    var f = expr();
+    if (pos !== ts.length) throw new Error('多余的输入，位置 ' + pos);
+    return f;
+  }
+
+  function parseBound(raw) {
+    var s = String(raw).trim().toLowerCase().replace(/\s/g, '');
+    if (s === 'inf' || s === '+inf' || s === 'infinity' || s === '+infinity' || s === '∞' || s === '+∞') return Infinity;
+    if (s === '-inf' || s === '-infinity' || s === '-∞') return -Infinity;
+    if (/^(pi|π)$/.test(s)) return Math.PI;
+    if (s === '-pi' || s === '-π') return -Math.PI;
+    var v = Number(s);
+    if (!isFinite(v) && s !== '') {
+      // 允许简单算式如 2*pi
+      try { v = compile(s)(0); } catch (e) { throw new Error('无法解析积分限：' + raw); }
+    }
+    if (isNaN(v)) throw new Error('无法解析积分限：' + raw);
+    return v;
+  }
+
+  // 把无限区间映射到 t∈(0,1)，返回 {g, lo, hi, label}
+  function transform(f, a, b) {
+    var eps = 1e-14;
+    if (isFinite(a) && isFinite(b)) {
+      return { g: function (t) { return f(a + (b - a) * t) * (b - a); }, lo: 0, hi: 1,
+               label: '有限区间线性映射' };
+    }
+    if (isFinite(a) && b === Infinity) {
+      return { g: function (t) {
+        var q = 1 - t; if (q <= 0) return 0;
+        return f(a + t / q) / (q * q);
+      }, lo: 0, hi: 1 - eps, label: 'x = a + t/(1−t)，dx = dt/(1−t)²' };
+    }
+    if (a === -Infinity && isFinite(b)) {
+      return { g: function (t) {
+        if (t <= 0) return 0;
+        return f(b - (1 - t) / t) / (t * t);
+      }, lo: eps, hi: 1, label: 'x = b − (1−t)/t，dx = dt/t²' };
+    }
+    if (a === -Infinity && b === Infinity) {
+      return { g: function (t) {
+        var ang = Math.PI * (t - 0.5);
+        return f(Math.tan(ang)) * Math.PI / (Math.cos(ang) * Math.cos(ang));
+      }, lo: eps, hi: 1 - eps, label: 'x = tan(π(t−1/2))' };
+    }
+    throw new Error('不支持的积分区间');
+  }
+
+  function simpson(g, a, b, fa, fb, fc) {
+    return (b - a) / 6 * (fa + 4 * fc + fb);
+  }
+
+  function adaptive(g, a, b, fa, fb, fc, whole, tol, depth, maxDepth, counter) {
+    var m = (a + b) / 2;
+    var lf = g((a + m) / 2), rf = g((m + b) / 2);
+    counter.n += 2;
+    if (!isFinite(lf) || !isFinite(rf)) { counter.bad = true; return whole; }
+    var L = simpson(g, a, m, fa, fc, lf), R = simpson(g, m, b, fc, fb, rf);
+    var delta = L + R - whole;
+    if (depth >= maxDepth) { counter.capped = true; return L + R + delta / 15; }
+    if (Math.abs(delta) <= 15 * tol) return L + R + delta / 15;
+    return adaptive(g, a, m, fa, fc, lf, L, tol / 2, depth + 1, maxDepth, counter)
+         + adaptive(g, m, b, fc, fb, rf, R, tol / 2, depth + 1, maxDepth, counter);
+  }
+
+  function integrateOnce(g, lo, hi, tol, segments) {
+    var total = 0, absSum = 0, counter = { n: 0, bad: false, capped: false, openEnd: false };
+    for (var k = 0; k < segments; k++) {
+      var a = lo + (hi - lo) * k / segments, b = lo + (hi - lo) * (k + 1) / segments;
+      var m = (a + b) / 2, fa = g(a), fb = g(b), fc = g(m);
+      counter.n += 3;
+      if (!isFinite(fa) || !isFinite(fb) || !isFinite(fc)) {
+        // 端点不可求值：内缩一个极小量重试，避免整段贡献被丢弃
+        var pad = (b - a) * 1e-9;
+        a += pad; b -= pad; m = (a + b) / 2;
+        fa = g(a); fb = g(b); fc = g(m);
+        counter.openEnd = true;
+        if (!isFinite(fa) || !isFinite(fb) || !isFinite(fc)) { counter.bad = true; continue; }
+      }
+      var whole = simpson(g, a, b, fa, fb, fc);
+      total += adaptive(g, a, b, fa, fb, fc, whole, tol / segments, 0, 24, counter);
+      absSum += (Math.abs(fa) + 4 * Math.abs(fc) + Math.abs(fb)) * (b - a) / 6;
+    }
+    return { value: total, absSum: absSum, evals: counter.n, bad: counter.bad, capped: counter.capped };
+  }
+
+  // 端点增长率诊断：|g| ~ delta^(-p)，p>=1 即对数/幂次发散
+  function endpointSlope(g, atLo, atHi) {
+    function slope(side) {
+      var xs = [], ys = [];
+      for (var k = 2; k <= 22; k++) {
+        var d = Math.pow(2, -k);
+        var t = side === 'lo' ? atLo + d : atHi - d;
+        var v = Math.abs(g(t));
+        if (!isFinite(v) || v === 0) continue;
+        xs.push(Math.log(d)); ys.push(Math.log(v));
+      }
+      if (xs.length < 6) return 0;
+      var mx = xs.reduce(function (a, b) { return a + b; }, 0) / xs.length;
+      var my = ys.reduce(function (a, b) { return a + b; }, 0) / ys.length;
+      var num = 0, den = 0;
+      for (var i = 0; i < xs.length; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) * (xs[i] - mx); }
+      return den ? num / den : 0;   // 负斜率 = 靠近端点时 |g| 增长
+    }
+    return { lo: slope('lo'), hi: slope('hi') };
+  }
+
+  function diagnose(g, lo, hi) {
+    var notes = [], verdict = 'ok', maxSeen = 0, badCount = 0;
+    for (var k = 1; k < 2000; k++) {
+      var t = lo + (hi - lo) * k / 2000, v = g(t);
+      if (!isFinite(v)) { badCount++; continue; }
+      maxSeen = Math.max(maxSeen, Math.abs(v));
+    }
+    var sl = endpointSlope(g, lo, hi);
+    if (sl.lo < -0.85 || sl.hi < -0.85) {
+      verdict = 'divergent';
+      notes.push('端点增长率检测：|g| ~ δ^(' + Math.min(sl.lo, sl.hi).toFixed(2) + ')，接近或超过 1/x 型奇点，积分很可能发散。');
+    } else if (sl.lo < -0.30 || sl.hi < -0.30) {
+      verdict = 'uncertain';
+      notes.push('检测到可积型端点奇点（|g| ~ δ^(' + Math.min(sl.lo, sl.hi).toFixed(2) + ')）；数值可能偏差较大，建议先做变量替换再算。');
+    }
+    if (badCount > 0) {
+      verdict = 'uncertain';
+      notes.push('采样中有 ' + badCount + ' 个点出现 NaN/Inf，可能存在内部奇点或定义域问题。');
+    }
+    if (maxSeen > 1e10) {
+      if (verdict === 'ok') verdict = 'uncertain';
+      notes.push('被积函数峰值达 ' + maxSeen.toExponential(2) + '，数值结果可能不稳定。');
+    }
+    return { verdict: verdict, notes: notes, slopeLo: sl.lo, slopeHi: sl.hi, badCount: badCount, maxSeen: maxSeen };
+  }
+
+  function integrate(f, aRaw, bRaw, options) {
+    var opt = options || {};
+    var a = typeof aRaw === 'number' ? aRaw : parseBound(aRaw);
+    var b = typeof bRaw === 'number' ? bRaw : parseBound(bRaw);
+    if (!(b > a)) throw new Error('需要上限 > 下限');
+    var tr = transform(f, a, b);
+    var diag = diagnose(tr.g, tr.lo, tr.hi);
+    var segments = opt.segments || 96;
+    var coarse = integrateOnce(tr.g, tr.lo, tr.hi, 1e-6, segments);
+    var fine = integrateOnce(tr.g, tr.lo, tr.hi, 1e-10, Math.max(segments, 192));
+    var value = fine.value;
+    var floor = 8 * Number.EPSILON * (fine.absSum + Math.abs(value)) + 1e-15 * Math.abs(value);
+    var tail = Math.abs(tr.g(tr.hi)) * (1 - tr.hi) * 4;   // 无穷尾未覆盖部分的保守估计
+    var sigma = Math.max(Math.abs(fine.value - coarse.value) * 2, floor,
+                         1e-15 * Math.abs(value), tail);
+    if (coarse.bad || fine.bad) {
+      if (diag.verdict === 'ok') diag.verdict = 'uncertain';
+      diag.notes.push('出现非有限采样值，误差估计仅供参考。');
+    }
+    if (coarse.capped || fine.capped) {
+      diag.notes.push('自适应细分达到深度上限（已接近双精度极限），误差界取保守值。');
+    }
+    if (coarse.openEnd || fine.openEnd) {
+      if (diag.verdict === 'ok') diag.verdict = 'uncertain';
+      diag.notes.push('端点不可直接求值，已用开端点替代；端点奇点可能带来额外偏差。');
+    }
+    var digits = sigma > 0 ? Math.max(0, -Math.log10(sigma / Math.max(1e-300, Math.abs(value)))) : 16;
+    return {
+      value: value, sigma: sigma, digits: Math.min(17, digits),
+      a: a, b: b, verdict: diag.verdict, notes: diag.notes,
+      slopes: { lo: diag.slopeLo, hi: diag.slopeHi },
+      evals: fine.evals, transformLabel: tr.label, segments: segments,
+      errorType: '估计界（自适应 Simpson + 粗细两档 Richardson 外推，非严格保证）'
+    };
+  }
+
+  function formatValue(value, sigma) {
+    var d = sigma > 0 ? Math.max(6, Math.min(17, Math.ceil(-Math.log10(sigma)) + 2)) : 17;
+    return value.toPrecision(d).replace(/(\.\d*?)0+e/, '$1e').replace(/(\.\d*?)0+$/, '$1');
+  }
+
+  var API = { compile: compile, parseBound: parseBound, integrate: integrate,
+              transform: transform, diagnose: diagnose, formatValue: formatValue };
+  global.IntegralCore = API;
+  if (typeof module !== 'undefined' && module.exports) module.exports = API;
+})(typeof window !== 'undefined' ? window : globalThis);
