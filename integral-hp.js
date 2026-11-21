@@ -2458,6 +2458,16 @@
             if (kind === 'singularity') {
               var vc = evalDec(fDec, cand);
               if (!vc.isFinite() || vc.abs().gt('1e20')) return cand.toString();
+            } else if (kind === 'kink') {
+              var dkH = new D('1e-8').mul(D.max(new D(1), cand.abs()));
+              var vc0 = evalDec(fDec, cand), vcm = evalDec(fDec, cand.minus(dkH)), vcp = evalDec(fDec, cand.plus(dkH));
+              var vcm2 = evalDec(fDec, cand.minus(dkH.mul(2))), vcp2 = evalDec(fDec, cand.plus(dkH.mul(2)));
+              if (vc0.isFinite() && vcm.isFinite() && vcp.isFinite() && vcm2.isFinite() && vcp2.isFinite()) {
+                var sCenter = vcp.minus(vc0.mul(2)).plus(vcm).abs();
+                var sLeft = vc0.minus(vcm.mul(2)).plus(vcm2).abs();
+                var sRight = vcp2.minus(vcp.mul(2)).plus(vc0).abs();
+                if (sCenter.gt(D.max(sLeft, sRight).mul(4))) return cand.toString();
+              }
             } else {
               return cand.toString();
             }
@@ -2562,6 +2572,285 @@
     }
   }
 
+  /* ---------- 周期折点/阶跃指数衰减半无穷求积（旗舰加号例题等 25+ 位通道） ---------- */
+  function integratePeriodicKinkExpTail(fNum, aRaw, bRaw, opt) {
+    var o = opt || {};
+    if (!fNum || !fNum.src) return null;
+    var digits = o.digits || 25;
+    var maxMs = o.maxMs || 2200;
+    var tStart = Date.now();
+    var oldPrec = D.precision;
+    D.set({ precision: digits + 18 });
+    try {
+      var A = parseBoundDec(aRaw), B = parseBoundDec(bRaw);
+      var a = A.num, b = B.num;
+      var dir, anchorDec, anchor;
+      if (isFinite(a) && b === Infinity) { dir = 1; anchorDec = A.dec; anchor = a; }
+      else if (a === -Infinity && isFinite(b)) { dir = -1; anchorDec = B.dec; anchor = b; }
+      else return null;
+
+      var pr = probeInfiniteTail(fNum, anchor, dir);
+      if (pr.divergentOverflow || pr.cutoff === null || pr.cutoff > 1000) return null;
+
+      /* 优先从表达式提取 abs/sign/min/max 参数 u_i(x) 零点（无被积函数外层 exp 衰减遮蔽） */
+      function extractSwitchArgs(srcStr) {
+        var out = [], s = String(srcStr || ''), pos = 0;
+        while (pos < s.length) {
+          var m = /\b(abs|sign|min|max)\s*\(/i.exec(s.slice(pos));
+          if (!m) break;
+          var fn = m[1].toLowerCase();
+          var start = pos + m.index + m[0].length;
+          var dep = 1, j = start, comma = -1;
+          while (j < s.length && dep > 0) {
+            var ch = s[j];
+            if (ch === '(') dep++;
+            else if (ch === ')') dep--;
+            else if (ch === ',' && dep === 1 && comma < 0) comma = j;
+            j++;
+          }
+          if (dep === 0) {
+            if ((fn === 'abs' || fn === 'sign') && comma < 0) {
+              out.push(s.slice(start, j - 1));
+            } else if ((fn === 'min' || fn === 'max') && comma > start) {
+              out.push('(' + s.slice(start, comma) + ')-(' + s.slice(comma + 1, j - 1) + ')');
+            }
+          }
+          pos = pos + m.index + m[1].length;
+        }
+        return out;
+      }
+
+      /* 在双精度下寻找紧凑指数衰减截断点 xCut（|f| <= 1e-32 * peak 连续保持 24 点） */
+      var peak = 0, xCut = Math.min(260, Math.max(40, pr.cutoff));
+      var scanCap = Math.min(320, Math.max(80, pr.cutoff));
+      var quietRun = 0, foundCut = false;
+      for (var blk = 0; blk * 4 < scanCap; blk++) {
+        for (var sub = 0; sub < 8; sub++) {
+          var rTry = blk * 4 + sub * 0.5;
+          var xTry = anchor + dir * rTry;
+          var vTry;
+          try { vTry = fNum(xTry); } catch (e) { vTry = NaN; }
+          if (!isFinite(vTry)) return null;
+          if (Math.abs(vTry) > peak) peak = Math.abs(vTry);
+          if (rTry >= 24 && peak > 0 && Math.abs(vTry) <= 1e-32 * peak) {
+            if (++quietRun >= 10) { xCut = rTry + 2; foundCut = true; break; }
+          } else {
+            quietRun = 0;
+          }
+        }
+        if (foundCut) break;
+      }
+      if (!foundCut) xCut = Math.min(260, pr.cutoff);
+      if (!(peak > 0)) return null;
+
+      var fDec = compileDec(fNum.src);
+      var xEndDec = anchorDec.plus(new D(xCut).mul(dir));
+      var nodes = [anchorDec];
+      var switchArgs = extractSwitchArgs(fNum.src);
+      var switchOk = false;
+
+      var coreAPI = global.IntegralCore || (typeof window !== 'undefined' ? window.IntegralCore : null);
+      if (switchArgs.length > 0 && coreAPI && coreAPI.compile) {
+        switchOk = true;
+        var gridN = 2048, drSw = xCut / gridN;
+        for (var sai = 0; sai < switchArgs.length; sai++) {
+          var uSrc = switchArgs[sai];
+          var uNumFn, uDecRaw;
+          try { uNumFn = coreAPI.compile(uSrc); uDecRaw = compileDec(uSrc); }
+          catch (e) { switchOk = false; break; }
+          var uRayDec = dir === 1
+            ? (function (fnDec) { return function (rD) { return fnDec(anchorDec.plus(rD)); }; })(uDecRaw)
+            : (function (fnDec) { return function (rD) { return fnDec(anchorDec.minus(rD)); }; })(uDecRaw);
+          var prevR = 0, prevU = uNumFn(anchor);
+          for (var gi = 1; gi <= gridN; gi++) {
+            var curR = gi * drSw;
+            var curU = uNumFn(anchor + dir * curR);
+            if (!isFinite(prevU) || !isFinite(curU)) { prevR = curR; prevU = curU; continue; }
+            if (prevU * curU < 0 || (curU === 0 && gi < gridN)) {
+              var zApproxR;
+              if (curU === 0) {
+                zApproxR = curR;
+              } else {
+                var aa = prevR, bb = curR, faa = prevU;
+                for (var bi = 0; bi < 45; bi++) {
+                  var mid = (aa + bb) / 2, fm = uNumFn(anchor + dir * mid);
+                  if (!isFinite(fm)) break;
+                  if (faa * fm <= 0) bb = mid; else { aa = mid; faa = fm; }
+                }
+                zApproxR = (aa + bb) / 2;
+              }
+              var spanZ = Math.min(drSw * 0.45, 1e-6 * (1 + zApproxR));
+              if (zApproxR - spanZ > 0 && zApproxR + spanZ < xCut) {
+                var zDecR = refineZeroDec(uRayDec, zApproxR, spanZ, new D('1e-46'));
+                if (!zDecR) zDecR = refineZeroDec(uRayDec, zApproxR, drSw * 0.6, new D('1e-46'));
+                if (zDecR && zDecR.gt(0) && zDecR.lt(xCut)) {
+                  nodes.push(anchorDec.plus(zDecR.mul(dir)));
+                }
+              }
+            }
+            prevR = curR; prevU = curU;
+          }
+          if (nodes.length > 180) break;
+        }
+      }
+
+      if (!switchOk || nodes.length <= 1) {
+        var N = 4096, dr = xCut / N;
+        var rs = [], vs = [];
+        for (var k = 0; k <= N; k++) {
+          var r = k * dr, v;
+          try { v = fNum(anchor + dir * r); } catch (e) { v = NaN; }
+          if (!isFinite(v)) return null;
+          rs.push(r); vs.push(v);
+        }
+        function refineKinkR(rL, rR) {
+          var aa = rL, bb = rR;
+          for (var it = 0; it < 44; it++) {
+            var w = bb - aa, m1 = aa + 0.25 * w, m2 = aa + 0.5 * w, m3 = aa + 0.75 * w;
+            var f0 = fNum(anchor + dir * aa), f1 = fNum(anchor + dir * m1), f2 = fNum(anchor + dir * m2);
+            var f3 = fNum(anchor + dir * m3), f4 = fNum(anchor + dir * bb);
+            if (!isFinite(f0) || !isFinite(f1) || !isFinite(f2) || !isFinite(f3) || !isFinite(f4)) break;
+            var dL = Math.abs(f2 - 2 * f1 + f0), dM = Math.abs(f3 - 2 * f2 + f1), dR = Math.abs(f4 - 2 * f3 + f2);
+            if (dL >= dM && dL >= dR) bb = m2;
+            else if (dR >= dM && dR >= dL) aa = m2;
+            else { aa = m1; bb = m3; }
+          }
+          return (aa + bb) / 2;
+        }
+        function refineJumpR(rL, rR) {
+          var aa = rL, bb = rR, fa = fNum(anchor + dir * aa);
+          for (var it = 0; it < 48; it++) {
+            var mid = (aa + bb) / 2;
+            if (mid <= aa || mid >= bb) break;
+            var fm = fNum(anchor + dir * mid);
+            if (!isFinite(fm)) return mid;
+            if (Math.abs(fm - fa) >= Math.abs(fNum(anchor + dir * bb) - fm)) bb = mid;
+            else { aa = mid; fa = fm; }
+          }
+          return (aa + bb) / 2;
+        }
+        var rawSplits = [];
+        for (var m = 2; m < N - 2; m++) {
+          var localScale = Math.max(Math.abs(vs[m - 1]), Math.abs(vs[m]), Math.abs(vs[m + 1]), 1e-32 * peak);
+          if (localScale < 1e-29 * peak) continue;
+          var dv0 = Math.abs(vs[m] - vs[m - 1]), dv1 = Math.abs(vs[m + 1] - vs[m]), dv2 = Math.abs(vs[m + 2] - vs[m + 1]);
+          var localStep = Math.max(dv0, dv2, 1e-10 * localScale);
+          var candR = null, candKind = null;
+          if (dv1 > 15 * localStep && dv1 > 1e-6 * localScale) {
+            candR = refineJumpR(rs[m], rs[m + 1]); candKind = 'jump';
+          } else {
+            var d0 = (vs[m - 1] - vs[m - 2]) / dr, d1 = (vs[m] - vs[m - 1]) / dr;
+            var d2 = (vs[m + 1] - vs[m]) / dr, d3 = (vs[m + 2] - vs[m + 1]) / dr;
+            var jump1 = Math.abs(d2 - d1), curv1 = Math.max(Math.abs(d1 - d0), Math.abs(d3 - d2), 1e-8 * localScale);
+            if (jump1 > 20 * curv1 && jump1 > 1e-6 * localScale) {
+              candR = refineKinkR(rs[m - 1], rs[m + 1]); candKind = 'kink';
+            } else if (m + 3 <= N) {
+              var d4 = (vs[m + 3] - vs[m + 2]) / dr, jump2 = Math.abs(d3 - d1);
+              var curv2 = Math.max(Math.abs(d1 - d0), Math.abs(d4 - d3), 1e-8 * localScale);
+              if (jump2 > 18 * curv2 && jump2 > 1e-6 * localScale) {
+                candR = refineKinkR(rs[m - 1], rs[m + 2]); candKind = 'kink';
+              }
+            }
+          }
+          if (candR !== null && candR > 1e-6 * xCut && candR < xCut - 1e-6 * xCut) {
+            if (!rawSplits.some(function (s) { return Math.abs(candR - s.r) < 1e-4 * xCut; })) {
+              rawSplits.push({ r: candR, kind: candKind });
+              if (rawSplits.length > 140) return null;
+            }
+          }
+        }
+        if (rawSplits.length === 0) return null;
+        var loBound = dir === 1 ? anchor : anchor - xCut;
+        var hiBound = dir === 1 ? anchor + xCut : anchor;
+        for (var ri = 0; ri < rawSplits.length; ri++) {
+          if (Date.now() - tStart > maxMs * 0.45) return null;
+          var sp = rawSplits[ri];
+          var spXStr = refineSplitDecimal(fNum.src, anchor + dir * sp.r, sp.kind, loBound, hiBound, 60);
+          var xSp = new D(spXStr);
+          var rSp = xSp.minus(anchorDec).mul(dir);
+          if (rSp.gt(0) && rSp.lt(xCut)) nodes.push(xSp);
+        }
+      }
+
+      nodes.push(xEndDec);
+      nodes.sort(function (u, v) { return u.cmp(v); });
+      var uniqNodes = [nodes[0]];
+      for (var ui = 1; ui < nodes.length; ui++) {
+        if (nodes[ui].minus(uniqNodes[uniqNodes.length - 1]).abs().gt('1e-28')) {
+          uniqNodes.push(nodes[ui]);
+        }
+      }
+      if (uniqNodes.length < 3 || uniqNodes.length > 220) return null;
+
+      /* 验证尾部截断误差确实低于目标位数 */
+      var tailPeak = new D(0);
+      for (var tj = 0; tj < 12; tj++) {
+        var xt = anchorDec.plus(new D(xCut + tj * 0.7).mul(dir));
+        var vt = evalDec(fDec, xt);
+        if (!vt.isFinite()) return null;
+        if (vt.abs().gt(tailPeak)) tailPeak = vt.abs();
+      }
+
+      var rule32 = glStdRule(32), rule16 = glStdRule(16);
+      var panelTol = new D(peak || 1).mul(new D(10).pow(-(digits + 9)));
+      var counter = { n: 0 };
+      var sum = new D(0), absSum = new D(0), estQuadErr = new D(0);
+      var needCheckAll = false;
+
+      for (var p = 0; p + 1 < uniqNodes.length; p++) {
+        if (Date.now() - tStart > maxMs) return null;
+        var pa = uniqNodes[p], pb = uniqNodes[p + 1];
+        var v32 = glIntegratePanel(fDec, pa, pb, rule32);
+        counter.n += rule32.n;
+        if (!v32.isFinite()) return null;
+        var pv = v32;
+        if (needCheckAll || p < 12 || (p % 4 === 0)) {
+          var v16 = glIntegratePanel(fDec, pa, pb, rule16);
+          counter.n += rule16.n;
+          if (!v16.isFinite()) return null;
+          var diffP = v32.minus(v16).abs();
+          if (diffP.gt(panelTol)) {
+            needCheckAll = true;
+            pv = glIntegrateAdaptive(fDec, pa, pb, panelTol, 1, rule32, rule16, counter);
+            if (!pv.isFinite()) return null;
+            estQuadErr = estQuadErr.plus(panelTol);
+          } else {
+            estQuadErr = estQuadErr.plus(diffP);
+          }
+        }
+        sum = sum.plus(pv);
+        absSum = absSum.plus(pv.abs());
+      }
+
+      var refScale = D.max(sum.abs(), absSum, new D('1e-300'));
+      var tailBound = tailPeak.mul(25);
+      var floor = refScale.mul(new D(10).pow(-digits));
+      var sigma = D.max(estQuadErr.mul(16), tailBound, floor);
+      if (sigma.gt(refScale.mul('1e-14'))) return null;
+
+      var dig = Math.min(40, sigma.div(refScale).ln().div(new D(10).ln()).neg().toNumber());
+      var isNearZ = sum.abs().lte(sigma) && sigma.lt(refScale.mul('1e-12'));
+      return {
+        value: isNearZ ? 0 : sum.toNumber(),
+        valueText: isNearZ ? '0' : sum.toSignificantDigits(digits + 6).toFixed(),
+        sigma: sigma.toNumber(),
+        digits: Math.max(0, dig),
+        absInt: absSum.toNumber(),
+        isNearZero: isNearZ,
+        level: 1,
+        evals: counter.n,
+        panels: uniqNodes.length - 1,
+        converged: true,
+        transformLabel: '周期折点分段 GL32（Decimal）',
+        overflowBound: xCut
+      };
+    } catch (e) {
+      return null;
+    } finally {
+      D.set({ precision: oldPrec });
+    }
+  }
+
   global.IntegralHP = {
     available: true,
     compile: compileDec,
@@ -2575,6 +2864,7 @@
     integrateOscGeneral: integrateOscGeneral,
     integratePosOsc: integratePosOsc,
     integrateLogTailDec: integrateLogTailDec,
+    integratePeriodicKinkExpTail: integratePeriodicKinkExpTail,
     refineSplitDecimal: refineSplitDecimal,
     decPI: decPI
   };

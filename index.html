@@ -232,7 +232,7 @@
   
   <main class="page-shell">
     <section class="solve-card glass-card content-card" id="integralPanel">
-      <div class="ries-kicker"><span>定积分层</span><strong>定积分 → 符号解 + 小数 + 闭式候选</strong><em>v2.12 · 高精度求积（exp-sinh/sinh-sinh）/ 发散与内部奇点诊断 / 通用交替与正项振荡加速 · 复用原版 RIES 12.0.2</em></div>
+      <div class="ries-kicker"><span>定积分层</span><strong>定积分 → 符号解 + 小数 + 闭式候选</strong><em>v2.16 · 三支柱架构（高精度求积 + 确定性 BigInt PSLQ + 50位 Fail-Closed 复核与 MDL 评分）· 复用原版 RIES 12.0.2</em></div>
       <div class="ig-panel">
         <div class="ig-row">
           <label>f(x)<input id="igF" value="abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" placeholder="如 abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" spellcheck="false"></label>
@@ -255,7 +255,7 @@
         <div id="igResult" class="hp-panel" hidden><div id="igOut"></div></div>
         <div id="igCandidates" class="results-panel" hidden>
           <h2 class="compact-title">闭式候选</h2>
-          <p class="subtle-note">候选由原版 RIES 引擎给出；「引擎误差」直接取 RIES 结果表第三列。「推测概率」再叠加公式长度、项数、RIES 自带的「高度」与候选基规模做经验折减，不是数学证明。<b>等价积分/级数变形与含自由参数 α 或整系数多项式的「参数化拟合」均不算闭式，单独列在表尾、不参与闭式概率排序</b>，请优先看「独立复核」列。</p>
+          <p class="subtle-note">候选由高精度确定性 PSLQ 引擎 + 原版 RIES 12.0.2 联合给出；「推测概率」基于 52 位 Fail-Closed 独立复核、积分结构先验与 MDL 最小描述长度净信息压缩计算，不是数学证明。<b>未通过高精度复核者（≥17.5 位时）强制封顶 ≤35%；等价积分/级数变形与高自由度「参数化拟合」均不算闭式</b>，请优先核对「独立复核」列。</p>
           <div class="table-wrap"><table class="ig-data"><thead><tr><th>候选表达式</th><th>引擎误差</th><th>推测概率</th><th>独立复核</th></tr></thead><tbody id="igCandBody"></tbody></table></div>
         </div>
       </div>
@@ -426,10 +426,11 @@
   </main>
   <script defer src="ries-script.js"></script>
   <script defer src="i18n.js"></script>
-  <script defer src="integral-hp.js?v=2.13"></script>
-  <script defer src="integral-core.js?v=2.13"></script>
-  <script defer src="integral-symbolic.js?v=2.13"></script>
-  <script defer src="integral-glue.js?v=2.15"></script>
+  <script defer src="integral-hp.js?v=2.16"></script>
+  <script defer src="integral-core.js?v=2.16"></script>
+  <script defer src="integral-symbolic.js?v=2.16"></script>
+  <script defer src="integral-pslq.js?v=2.16"></script>
+  <script defer src="integral-glue.js?v=2.16"></script>
   <script>
     /* 内联兜底：外部 .js 全部 404 / 被拦截时（如手机上只打开单个 html、
        或浏览器禁止 file:// 读兄弟资源），defer 脚本不会执行，按钮会静默失效。

@@ -344,6 +344,7 @@
     if (m <= a || m >= b) { counter.capped = true; return whole; }
     if (counter.n >= counter.maxEvals || ((counter.n & 4095) === 0 && Date.now() > counter.deadline)) {
       counter.capped = true;
+      counter.evalCapped = true;
       return whole;
     }
     var lf = safeEval(g, (a + m) / 2), rf = safeEval(g, (m + b) / 2);
@@ -362,7 +363,7 @@
   function integrateOnce(g, lo, hi, tol, segments, maxDepth, maxEvals) {
     var total = 0, absSum = 0;
     var counter = {
-      n: 0, err: 0, bad: false, capped: false, openEnd: false,
+      n: 0, err: 0, bad: false, capped: false, evalCapped: false, openEnd: false,
       maxEvals: maxEvals || 450000,
       deadline: Date.now() + 2000
     };
@@ -383,7 +384,7 @@
       absSum += (Math.abs(fa) + 4 * Math.abs(fc) + Math.abs(fb)) * (b - a) / 6;
     }
     return { value: total, absSum: absSum, evals: counter.n, err: counter.err,
-             bad: counter.bad, capped: counter.capped, openEnd: counter.openEnd };
+             bad: counter.bad, capped: counter.capped, evalCapped: counter.evalCapped, openEnd: counter.openEnd };
   }
 
   /* 16 点 Gauss-Legendre 复合求积（有限区间光滑高频振荡，比 4 阶 Simpson 快百倍） */
@@ -420,28 +421,30 @@
   }
 
   function integrateHighFreqGL(g, lo, hi, signChanges) {
-    var n0 = Math.max(64, Math.min(4096, Math.ceil(signChanges * 2.5)));
+    var n0 = Math.max(64, Math.min(4096, Math.ceil(signChanges * 3)));
     var r1 = compositeGL16(g, lo, hi, n0);
     if (r1.bad || !isFinite(r1.value)) return null;
     var totalEvals = r1.evals, prev = r1, cur = r1, n = n0;
-    for (var step = 0; step < 3; step++) {
+    var lastDiff = Infinity, prevDiff = Infinity;
+    for (var step = 0; step < 4; step++) {
       n *= 2;
-      if (n > 16384) break;
+      if (n > 32768) break;
       cur = compositeGL16(g, lo, hi, n);
       totalEvals += cur.evals;
       if (cur.bad || !isFinite(cur.value)) return null;
       var diff = Math.abs(cur.value - prev.value);
+      prevDiff = lastDiff;
+      lastDiff = diff;
       var scale = Math.max(Math.abs(cur.value), cur.absSum, 1e-300);
-      if (diff <= 1e-13 * scale) {
-        var sig = Math.max(diff * 16, 64 * Number.EPSILON * (cur.absSum + Math.abs(cur.value)));
+      if (diff <= 1e-13 * scale && (step >= 1 || n0 >= 128)) {
+        var sig = Math.max(diff * 32, 512 * Number.EPSILON * (cur.absSum + Math.abs(cur.value)));
         return { value: cur.value, absSum: cur.absSum, sigma: sig, evals: totalEvals, panels: n };
       }
       prev = cur;
     }
-    var diffLast = Math.abs(cur.value - prev.value);
     var scaleLast = Math.max(Math.abs(cur.value), cur.absSum, 1e-300);
-    if (diffLast <= 1e-10 * scaleLast) {
-      var sigLast = Math.max(diffLast * 16, 64 * Number.EPSILON * (cur.absSum + Math.abs(cur.value)));
+    if (lastDiff <= 1e-10 * scaleLast && (prevDiff === Infinity || prevDiff >= lastDiff * 6)) {
+      var sigLast = Math.max(lastDiff * 32, 512 * Number.EPSILON * (cur.absSum + Math.abs(cur.value)));
       return { value: cur.value, absSum: cur.absSum, sigma: sigLast, evals: totalEvals, panels: n };
     }
     return null;
@@ -596,10 +599,13 @@
       return { slope: pF, divergent: true, reason: 'log-critical', integrableSingularity: false, oscillatoryTail: false, benignOverflow: false, domainBad: false };
     }
 
-    var useSlope = Math.min(pF, slopeAll);
+    var useSlope = (pF < -0.005 && pts[pts.length - 1].abs > pts[0].abs * 1.1)
+      ? Math.min(pF, slopeAll)
+      : pF;
     return {
       slope: pF,
       slopeAll: slopeAll,
+      useSlope: useSlope,
       divergent: false,
       integrableSingularity: useSlope < -0.08,
       oscillatoryTail: false,
@@ -719,6 +725,180 @@
     return (a + b) / 2;
   }
 
+  /* AST 引导的特征点提取：从被积函数源码中符号解析内部极点、分支/折点与远端窄峰中心 */
+  function extractAstSeeds(src, a, b) {
+    if (!src) return [];
+    try {
+      var ts = insertImplicitMul(tokenize(src)), pos = 0;
+      function peek() { return ts[pos]; }
+      function parseExprAST() {
+        var left = parseTermAST();
+        while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+          var op = ts[pos++].v;
+          left = { k: 'bin', op: op, l: left, r: parseTermAST() };
+        }
+        return left;
+      }
+      function parseTermAST() {
+        var left = parseUnaryAST();
+        while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
+          var op = ts[pos++].v;
+          left = { k: 'bin', op: op, l: left, r: parseUnaryAST() };
+        }
+        return left;
+      }
+      function parseUnaryAST() {
+        if (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
+          return { k: 'un', op: ts[pos++].v, a: parseUnaryAST() };
+        }
+        return parsePowAST();
+      }
+      function parsePowAST() {
+        var base = parsePrimAST();
+        if (peek() && peek().t === 'op' && peek().v === '^') {
+          pos++;
+          return { k: 'bin', op: '^', l: base, r: parseUnaryAST() };
+        }
+        return base;
+      }
+      function parsePrimAST() {
+        var k = peek();
+        if (!k) throw new Error('eof');
+        if (k.t === 'num') { pos++; return { k: 'num', v: k.v }; }
+        if (k.t === 'id') {
+          pos++;
+          if (k.v === 'x') return { k: 'var' };
+          if (peek() && peek().t === 'lp') {
+            pos++;
+            var args = [];
+            if (!peek() || peek().t !== 'rp') {
+              args.push(parseExprAST());
+              while (peek() && peek().t === 'comma') { pos++; args.push(parseExprAST()); }
+            }
+            if (peek() && peek().t === 'rp') pos++;
+            return { k: 'fn', name: k.v, args: args };
+          }
+          if (Object.prototype.hasOwnProperty.call(CONSTS, k.v)) return { k: 'num', v: CONSTS[k.v] };
+          return { k: 'other' };
+        }
+        if (k.t === 'lp') {
+          pos++;
+          var inner = parseExprAST();
+          if (peek() && peek().t === 'rp') pos++;
+          return inner;
+        }
+        return { k: 'other' };
+      }
+      var ast = parseExprAST();
+
+      function poly2(node) {
+        if (!node) return null;
+        if (node.k === 'num') return isFinite(node.v) ? { c0: node.v, c1: 0, c2: 0 } : null;
+        if (node.k === 'var') return { c0: 0, c1: 1, c2: 0 };
+        if (node.k === 'un') {
+          var p = poly2(node.a);
+          if (!p) return null;
+          return node.op === '-' ? { c0: -p.c0, c1: -p.c1, c2: -p.c2 } : p;
+        }
+        if (node.k === 'bin') {
+          var l = poly2(node.l), r = poly2(node.r);
+          if (!l || !r) return null;
+          if (node.op === '+') return { c0: l.c0 + r.c0, c1: l.c1 + r.c1, c2: l.c2 + r.c2 };
+          if (node.op === '-') return { c0: l.c0 - r.c0, c1: l.c1 - r.c1, c2: l.c2 - r.c2 };
+          if (node.op === '*') {
+            var dL = l.c2 !== 0 ? 2 : l.c1 !== 0 ? 1 : 0;
+            var dR = r.c2 !== 0 ? 2 : r.c1 !== 0 ? 1 : 0;
+            if (dL + dR > 2) return null;
+            return {
+              c0: l.c0 * r.c0,
+              c1: l.c0 * r.c1 + l.c1 * r.c0,
+              c2: l.c0 * r.c2 + l.c1 * r.c1 + l.c2 * r.c0
+            };
+          }
+          if (node.op === '/') {
+            if (r.c1 === 0 && r.c2 === 0 && r.c0 !== 0) {
+              return { c0: l.c0 / r.c0, c1: l.c1 / r.c0, c2: l.c2 / r.c0 };
+            }
+            return null;
+          }
+          if (node.op === '^') {
+            if (r.c1 === 0 && r.c2 === 0) {
+              if (r.c0 === 0) return { c0: 1, c1: 0, c2: 0 };
+              if (r.c0 === 1) return l;
+              if (r.c0 === 2 && l.c2 === 0) {
+                return { c0: l.c0 * l.c0, c1: 2 * l.c0 * l.c1, c2: l.c1 * l.c1 };
+              }
+            }
+            return null;
+          }
+        }
+        return null;
+      }
+
+      var seeds = [];
+      function addSeed(x, hint) {
+        if (!isFinite(x)) return;
+        if (isFinite(a) && !(x > a)) return;
+        if (isFinite(b) && !(x < b)) return;
+        for (var i = 0; i < seeds.length; i++) {
+          if (seeds[i].hint === hint && Math.abs(seeds[i].x - x) <= 1e-12 * Math.max(1, Math.abs(x))) return;
+        }
+        if (seeds.length < 24) seeds.push({ x: x, hint: hint });
+      }
+      function addPolyRoots(p, offset, hint) {
+        if (!p) return;
+        var c0 = p.c0 + offset, c1 = p.c1, c2 = p.c2;
+        if (c2 === 0) {
+          if (c1 !== 0) addSeed(-c0 / c1, hint);
+          return;
+        }
+        var disc = c1 * c1 - 4 * c2 * c0;
+        if (disc >= 0) {
+          var sd = Math.sqrt(disc);
+          addSeed((-c1 - sd) / (2 * c2), hint);
+          addSeed((-c1 + sd) / (2 * c2), hint);
+        }
+      }
+
+      var ZERO_FNS = { ln: 1, log: 1, log10: 1, log2: 1, abs: 1, sign: 1, floor: 1, ceil: 1, sqrt: 1, cbrt: 1 };
+      var UNIT_FNS = { asin: 1, acos: 1, atanh: 1 };
+      function walk(node) {
+        if (!node || typeof node !== 'object') return;
+        if (node.k === 'fn' && node.args && node.args.length >= 1) {
+          var p0 = poly2(node.args[0]);
+          if (p0) {
+            if (ZERO_FNS[node.name]) addPolyRoots(p0, 0, 'sing_or_kink');
+            if (UNIT_FNS[node.name]) { addPolyRoots(p0, -1, 'sing_or_kink'); addPolyRoots(p0, 1, 'sing_or_kink'); }
+            if (node.name === 'exp' && p0.c2 !== 0) addSeed(-p0.c1 / (2 * p0.c2), 'peak');
+          }
+          for (var ai = 0; ai < node.args.length; ai++) walk(node.args[ai]);
+          return;
+        }
+        if (node.k === 'bin') {
+          if (node.op === '/') {
+            var pr = poly2(node.r);
+            if (pr) {
+              addPolyRoots(pr, 0, 'sing_or_kink');
+              if (pr.c2 !== 0) addSeed(-pr.c1 / (2 * pr.c2), 'peak');
+            }
+          } else if (node.op === '^') {
+            var ex = poly2(node.r), baseP = poly2(node.l);
+            if (baseP && ex && ex.c1 === 0 && ex.c2 === 0 && Math.abs(ex.c0 - Math.round(ex.c0)) > 1e-12) {
+              addPolyRoots(baseP, 0, 'sing_or_kink');
+            }
+          }
+          walk(node.l); walk(node.r);
+          return;
+        }
+        if (node.k === 'un') walk(node.a);
+      }
+      walk(ast);
+      return seeds;
+    } catch (e) {
+      return [];
+    }
+  }
+
   function scanInterior(f, tr, isFiniteInterval, hasKinkFuncs, onlySqrtKink) {
     var g = tr.g, lo = tr.lo, hi = tr.hi, W = hi - lo;
     if (!(W > 0)) return { divergent: false, splits: [] };
@@ -779,6 +959,21 @@
     var splits = [];
     var seenT = [];
     var refMagF = null;
+    function getRefMagF() {
+      if (refMagF !== null) return refMagF;
+      var fMags = [];
+      var fStep = Math.max(1, Math.floor(ts.length / 64));
+      for (var fi = 0; fi < ts.length; fi += fStep) {
+        var fv = safeEval(f, tr.toX(ts[fi]));
+        if (isFinite(fv)) fMags.push(Math.abs(fv));
+      }
+      fMags.sort(function (a, b) { return a - b; });
+      var fMed = fMags.length ? fMags[Math.floor(fMags.length * 0.5)] : 0;
+      var fP75 = fMags.length ? fMags[Math.floor(fMags.length * 0.75)] : 0;
+      refMagF = Math.max(fMed, fP75 * 0.25, 1e-300);
+      return refMagF;
+    }
+
     for (var ci = 0; ci < cands.length; ci++) {
       var cd = cands[ci];
       var tStar = cd.exact !== undefined && !cd.flip
@@ -794,8 +989,8 @@
 
       var spanSide = Math.min(0.1 * W, Math.max(tStar - lo, 0) * 0.5, Math.max(hi - tStar, 0) * 0.5);
       if (spanSide <= 1e-11 * W) continue;
-      var leftA = analyzeEndpoint(g, tStar - spanSide, tStar, 'hi');
-      var rightA = analyzeEndpoint(g, tStar, tStar + spanSide, 'lo');
+      var leftA = analyzeEndpoint(g, tStar - spanSide, tStar, 'hi', true);
+      var rightA = analyzeEndpoint(g, tStar, tStar + spanSide, 'lo', true);
       var xStar = tr.toX(tStar);
       if (leftA.divergent || rightA.divergent) {
         return { divergent: true, atX: xStar, atT: tStar, splits: [] };
@@ -808,24 +1003,95 @@
       } else if (isFinite(vStar) && Math.abs(vStar) > 1000 * refMag) {
         var allowPeak = isFiniteInterval;
         if (!allowPeak) {
-          /* 无穷区间仅当原函数 |f(x*)| 本身也远超原空间参考量级时才判为孤立远端峰（如 exp(-(x-50)²)），
-             避免把半无穷雅可比 1/(1-t)² 放大的光滑振荡尾（如 sin²x/(x ln x)）误拆为峰 */
-          if (refMagF === null) {
-            var fMags = [];
-            var fStep = Math.max(1, Math.floor(ts.length / 64));
-            for (var fi = 0; fi < ts.length; fi += fStep) {
-              var fv = safeEval(f, tr.toX(ts[fi]));
-              if (isFinite(fv)) fMags.push(Math.abs(fv));
-            }
-            fMags.sort(function (a, b) { return a - b; });
-            var fMed = fMags.length ? fMags[Math.floor(fMags.length * 0.5)] : 0;
-            var fP75 = fMags.length ? fMags[Math.floor(fMags.length * 0.75)] : 0;
-            refMagF = Math.max(fMed, fP75 * 0.25, 1e-300);
-          }
+          /* 无穷区间仅当原函数 |f(x*)| 本身也远超原空间参考量级时才判为孤立远端峰（如 exp(-(x-50)²)） */
           var fStar = safeEval(f, xStar);
-          allowPeak = isFinite(fStar) && Math.abs(fStar) > 1000 * refMagF;
+          allowPeak = isFinite(fStar) && Math.abs(fStar) > 1000 * getRefMagF();
         }
         if (allowPeak) splits.push({ t: tStar, x: xStar, kind: 'peak' });
+      }
+    }
+
+    /* AST 解析直达特征点：捕获偏置对数奇点（如 10+ln|x-0.37|）与远端亚网格孤立峰（如 exp(-(x-1000)²)） */
+    if (f && f.src) {
+      var xA = tr.toX(lo), xB = tr.toX(hi);
+      var astSeeds = extractAstSeeds(f.src, xA, xB);
+      for (var asi = 0; asi < astSeeds.length; asi++) {
+        var sd = astSeeds[asi];
+        var tSd = tr.fromX ? tr.fromX(sd.x) : NaN;
+        if (!(tSd > lo + 1e-12 * W && tSd < hi - 1e-12 * W)) continue;
+        if (sd.hint === 'sing_or_kink') {
+          var dupAst = false;
+          for (var sj0 = 0; sj0 < seenT.length; sj0++) {
+            if (Math.abs(tSd - seenT[sj0]) < 1e-6 * W) { dupAst = true; break; }
+          }
+          if (dupAst) continue;
+          var spS = Math.min(0.1 * W, Math.max(tSd - lo, 0) * 0.5, Math.max(hi - tSd, 0) * 0.5);
+          if (spS <= 1e-12 * W) continue;
+          var lAst = analyzeEndpoint(g, tSd - spS, tSd, 'hi', true);
+          var rAst = analyzeEndpoint(g, tSd, tSd + spS, 'lo', true);
+          if (lAst.divergent || rAst.divergent) {
+            return { divergent: true, atX: sd.x, atT: tSd, splits: [] };
+          }
+          var fxSd = safeEval(f, sd.x);
+          if (!isFinite(fxSd) || (lAst.integrableSingularity && lAst.slope < -0.02) || (rAst.integrableSingularity && rAst.slope < -0.02)) {
+            seenT.push(tSd);
+            splits.push({ t: tSd, x: sd.x, kind: 'singularity', exactX: true });
+          } else {
+            var hAst = Math.min(1e-5 * Math.max(1, Math.abs(sd.x)), Math.abs(sd.x - xA) * 0.1, Math.abs(xB - sd.x) * 0.1);
+            if (hAst > 0) {
+              var fm1 = safeEval(f, sd.x - hAst), fp1 = safeEval(f, sd.x + hAst);
+              var fm2 = safeEval(f, sd.x - 2 * hAst), fp2 = safeEval(f, sd.x + 2 * hAst);
+              if (isFinite(fm1) && isFinite(fp1) && isFinite(fm2) && isFinite(fp2)) {
+                var jmpV = Math.abs(fp1 - fm1), diffV = Math.abs((fp2 - fp1) - (fm1 - fm2));
+                var jumpK = Math.abs(fp1 - 2 * fxSd + fm1), smoothK = Math.max(Math.abs(fp2 - 2 * fp1 + fxSd), Math.abs(fxSd - 2 * fm1 + fm2), 1e-12 * Math.max(1, Math.abs(fxSd)));
+                if (jmpV > 12 * Math.max(diffV, 1e-12 * Math.max(1, Math.abs(fxSd)))) {
+                  seenT.push(tSd);
+                  splits.push({ t: tSd, x: sd.x, kind: 'jump', exactX: true });
+                } else if (jumpK > 20 * smoothK && jumpK > 1e-11 * Math.max(1, Math.abs(fxSd))) {
+                  seenT.push(tSd);
+                  splits.push({ t: tSd, x: sd.x, kind: 'kink', exactX: true });
+                }
+              }
+            }
+          }
+        } else if (sd.hint === 'peak') {
+          var fPeak = safeEval(f, sd.x);
+          if (!isFinite(fPeak) || !(Math.abs(fPeak) > 0)) continue;
+          var hw = 0.5;
+          for (var ws1 = 0; ws1 < 22; ws1++) {
+            var fwA = Math.max(Math.abs(safeEval(f, sd.x - hw) || 0), Math.abs(safeEval(f, sd.x + hw) || 0));
+            if (fwA >= 0.05 * Math.abs(fPeak)) break;
+            hw *= 0.5;
+          }
+          for (var ws2 = 0; ws2 < 14; ws2++) {
+            var fwB = Math.min(Math.abs(safeEval(f, sd.x - hw) || 0), Math.abs(safeEval(f, sd.x + hw) || 0));
+            if (fwB <= 0.5 * Math.abs(fPeak)) break;
+            hw *= 2;
+          }
+          var wing16 = Math.max(
+            (sd.x - 16 * hw > xA) ? Math.abs(safeEval(f, sd.x - 16 * hw) || 0) : 0,
+            (sd.x + 16 * hw < xB) ? Math.abs(safeEval(f, sd.x + 16 * hw) || 0) : 0
+          );
+          if (wing16 < 0.05 * Math.abs(fPeak) && (hw < 0.05 * Math.max(1, Math.abs(sd.x)) || Math.abs(fPeak) > 100 * getRefMagF())) {
+            var candPk = [sd.x];
+            if (wing16 < 1e-6 * Math.abs(fPeak)) {
+              candPk.push(sd.x - 16 * hw, sd.x + 16 * hw);
+            }
+            for (var pki = 0; pki < candPk.length; pki++) {
+              var xPk = candPk[pki];
+              var tPk = tr.fromX ? tr.fromX(xPk) : NaN;
+              if (!(tPk > lo + 1e-12 * W && tPk < hi - 1e-12 * W)) continue;
+              var dupPk = false;
+              for (var sji = 0; sji < seenT.length; sji++) {
+                if (Math.abs(tPk - seenT[sji]) < 1e-10 * W) { dupPk = true; break; }
+              }
+              if (!dupPk) {
+                seenT.push(tPk);
+                splits.push({ t: tPk, x: xPk, kind: 'peak', exactX: true });
+              }
+            }
+          }
+        }
       }
     }
 
@@ -1246,6 +1512,93 @@
     };
   }
 
+  /* ---------- 绝对收敛无穷振荡检测与分段 GL16（如 sin(x)sin(√2·x)/x²） ---------- */
+  function probeAbsoluteTailEnvelope(f, a, b) {
+    var dir, anchor;
+    if (isFinite(a) && b === Infinity) { dir = 1; anchor = a; }
+    else if (a === -Infinity && isFinite(b)) { dir = -1; anchor = b; }
+    else return null;
+    var gRay = dir === 1 ? function (r) { return f(anchor + r); } : function (r) { return f(anchor - r); };
+    var shells = [];
+    for (var k = 3; k <= 13; k++) {
+      var R = Math.pow(2, k), sumAbs = 0;
+      for (var j = 0; j < 16; j++) {
+        var r = R * (1 + (j + 0.5) / 16);
+        var v = safeEval(gRay, r);
+        if (!isFinite(v)) return null;
+        sumAbs += Math.abs(v);
+      }
+      var shellAbs = (sumAbs / 16) * R;
+      if (!(shellAbs > 0)) {
+        if (k >= 8 && shells.length >= 4) return { absConv: true, expZero: true, envIntSlope: -10, cutoffR: R };
+        return null;
+      }
+      shells.push({ R: R, A: shellAbs });
+    }
+    var tailSh = shells.slice(Math.floor(shells.length / 2));
+    var slope = olsSlope(tailSh, function (s) { return Math.log(s.R); }, function (s) { return Math.log(s.A); });
+    if (!(slope < -0.35)) return null;
+    return { absConv: true, expZero: false, envIntSlope: slope };
+  }
+
+  function integrateAbsConvOsc(f, a, b, envInfo) {
+    var dir, anchor;
+    if (isFinite(a) && b === Infinity) { dir = 1; anchor = a; }
+    else if (a === -Infinity && isFinite(b)) { dir = -1; anchor = b; }
+    else return null;
+    var gRay = dir === 1 ? function (r) { return f(anchor + r); } : function (r) { return f(anchor - r); };
+
+    /* 首壳 [0, 1]：支持端点可积奇点拉伸 */
+    var tr0 = transform(gRay, 0, 1);
+    var g0 = patchEnds(tr0.g, tr0.lo, tr0.hi);
+    var end0 = analyzeEndpoint(g0, tr0.lo, tr0.hi, 'lo', true);
+    if (end0.divergent) return null;
+    if (end0.slope < -0.08) {
+      var m0 = Math.min(12, Math.max(2, Math.ceil(0.98 / Math.max(0.05, 1 + end0.slope))));
+      g0 = stretchEnds(g0, tr0.lo, tr0.hi, m0, 1);
+    }
+    var r0 = integrateOnce(g0, 0, 1, 1e-12, 32, 18, 80000);
+    if (!isFinite(r0.value) || r0.bad) return null;
+
+    var val = r0.value, accAbs = r0.absSum, quadErr = r0.err, evals = r0.evals, segs = 32;
+    var lastShellAbs = r0.absSum, endedEarly = false, tinyRun = 0;
+    var maxEvalsTotal = 240000;
+    for (var k = 0; k <= 13; k++) {
+      var R1 = Math.pow(2, k), R2 = R1 * 2;
+      var sc = 0, lastS = 0;
+      for (var s = 0; s < 192; s++) {
+        var vs = safeEval(gRay, R1 + (R2 - R1) * (s + 0.5) / 192);
+        if (!isFinite(vs)) return null;
+        if (vs !== 0) {
+          var sg = vs > 0 ? 1 : -1;
+          if (lastS !== 0 && sg !== lastS) sc++;
+          lastS = sg;
+        }
+      }
+      var panels = Math.max(32, Math.min(4096, Math.max(sc * 3, 48)));
+      if (evals + panels * 48 > maxEvalsTotal && k >= 6) break;
+      var gLo = compositeGL16(gRay, R1, R2, panels);
+      var gHi = compositeGL16(gRay, R1, R2, panels * 2);
+      evals += gLo.evals + gHi.evals;
+      segs += panels * 2;
+      if (gLo.bad || gHi.bad || !isFinite(gHi.value)) return null;
+      val += gHi.value;
+      accAbs += gHi.absSum;
+      quadErr += Math.abs(gHi.value - gLo.value);
+      lastShellAbs = gHi.absSum;
+      if (gHi.absSum <= 1e-13 * Math.max(accAbs, 1e-300)) {
+        if (++tinyRun >= 2) { endedEarly = true; break; }
+      } else {
+        tinyRun = 0;
+      }
+    }
+    var ratio = Math.pow(2, envInfo.envIntSlope);
+    var tailBound = endedEarly ? lastShellAbs * 4 : (2 * lastShellAbs * ratio / Math.max(0.15, 1 - ratio));
+    var sigma = Math.max(quadErr * 16, tailBound, 128 * Number.EPSILON * (accAbs + Math.abs(val)));
+    if (!isFinite(val) || !isFinite(sigma)) return null;
+    return { value: val, sigma: sigma, absSum: accAbs, evals: evals, segments: segs };
+  }
+
   /* ---------- 主积分入口 ---------- */
   function integrate(f, aRaw, bRaw, options) {
     var opt = options || {};
@@ -1643,10 +1996,40 @@
             errorType: '估计界（两段加速一致性，非严格保证）'
           };
         }
+      }
+      /* 若单调交替加速未适用（如准周期拍频 sin(x)sin(√2·x)/x²），先核验包络是否绝对可积 ∫|f|<∞ */
+      if (isFinite(a) !== isFinite(b)) {
+        var absEnv = probeAbsoluteTailEnvelope(f, a, b);
+        if (absEnv && absEnv.absConv) {
+          var absRes = integrateAbsConvOsc(f, a, b, absEnv);
+          if (absRes && isFinite(absRes.value)) {
+            var absScale = Math.max(Math.abs(absRes.value), 1e-300);
+            var absDig = absRes.sigma > 0 ? Math.max(0, -Math.log10(absRes.sigma / absScale)) : 16;
+            var absNearZ = Math.abs(absRes.value) <= absRes.sigma && absRes.sigma < 1e-11 * Math.max(absScale, absRes.absSum);
+            return {
+              value: absNearZ ? 0 : absRes.value,
+              sigma: absRes.sigma,
+              digits: Math.min(17, absDig),
+              valueText: absNearZ ? '0' : null,
+              hpDigits: null,
+              isNearZero: absNearZ,
+              a: a, b: b, verdict: 'ok',
+              notes: notes.filter(function (n) { return n.indexOf('发散') < 0; }).concat([
+                '检测到无穷振荡但包络绝对可积（壳积分衰减阶 ~ R^(' + absEnv.envIntSlope.toFixed(2) + ') < -0.35），改用倍增壳复合 GL16 并附带几何截断上界。'
+              ]),
+              slopes: { lo: diag.slopeLo, hi: diag.slopeHi },
+              evals: absRes.evals, transformLabel: tr.label, segments: absRes.segments,
+              method: '绝对收敛振荡分段 GL16', signChanges: diag.signChanges,
+              errorType: '估计界（倍增壳复合 GL16 误差 + 包络截断上界）'
+            };
+          }
+        }
+      }
+      if (osc && !osc.consistent) {
         return {
           value: 0, sigma: Infinity, digits: 0, a: a, b: b, verdict: 'oscillatory',
           notes: notes.filter(function (n) { return n.indexOf('发散') < 0; }).concat([
-            '被积函数在无穷区间反复变号，零交叉分片 + Wynn 外推未达成一致（差 ' + osc.gap.toExponential(2) + '），不给假数。'
+            '被积函数在无穷区间反复变号，零交叉分片 + Wynn 外推未达成一致（差 ' + osc.gap.toExponential(2) + '），且未检测到绝对可积衰减包络，不给假数。'
           ]),
           slopes: { lo: diag.slopeLo, hi: diag.slopeHi },
           evals: osc.evals, transformLabel: tr.label, segments: osc.panels,
@@ -1773,7 +2156,9 @@
         var ptsX = [aRaw];
         for (var spI = 0; spI < interior.splits.length; spI++) {
           var sp = interior.splits[spI];
-          var spRaw = (ROOT && ROOT.IntegralHP && ROOT.IntegralHP.refineSplitDecimal && f.src)
+          var spRaw = sp.exactX
+            ? String(sp.x)
+            : (ROOT && ROOT.IntegralHP && ROOT.IntegralHP.refineSplitDecimal && f.src)
             ? ROOT.IntegralHP.refineSplitDecimal(f.src, sp.x, sp.kind, a, b, 60)
             : String(sp.x);
           ptsX.push(spRaw);
@@ -1851,8 +2236,8 @@
     }
 
     /* 7. 有限区间与半无穷有限端的可积奇点做变量拉伸（非零实端点上限封顶 4，防下溢抖动） */
-    var origSlopeLo = Math.min(diag.slopeLo, diag.endLo && typeof diag.endLo.slopeAll === 'number' ? diag.endLo.slopeAll : 0);
-    var origSlopeHi = Math.min(diag.slopeHi, diag.endHi && typeof diag.endHi.slopeAll === 'number' ? diag.endHi.slopeAll : 0);
+    var origSlopeLo = (diag.endLo && typeof diag.endLo.useSlope === 'number') ? diag.endLo.useSlope : diag.slopeLo;
+    var origSlopeHi = (diag.endHi && typeof diag.endHi.useSlope === 'number') ? diag.endHi.useSlope : diag.slopeHi;
     var effLo = origSlopeLo, effHi = origSlopeHi;
     var mLo = 1, mHi = 1;
     if (isFinite(a) && effLo < -0.08) {
@@ -1888,14 +2273,64 @@
       };
     }
 
+    /* 7b. 有限高频通道前检测端点非解析分支点（如 sin(x)/sqrt(x) 在 x=0 呈 √x，GL 阶退化到 O(h^1.5)） */
+    if (depth < 2 && isFinite(a) && isFinite(b) && diag.signChanges >= 40 && mLo === 1 && mHi === 1 &&
+        f.src && /\b(sqrt|cbrt|ln|log|asin|acos|atanh)\b|\^\s*\(?\s*-?\d*\.\d+|\^\s*\(?\s*-?\d+\s*\/\s*\d+/i.test(f.src)) {
+      var Wcol = b - a;
+      var h1C = Math.min(1e-6 * Wcol, 1e-5), h2C = 100 * h1C;
+      var endNonSmooth = function (isLeft) {
+        var ePt = isLeft ? a : b, sgn = isLeft ? 1 : -1;
+        var fe = safeEval(f, ePt);
+        if (!isFinite(fe)) return true;
+        var f1a = safeEval(f, ePt + sgn * h1C), f1b = safeEval(f, ePt + sgn * 2 * h1C);
+        var f2a = safeEval(f, ePt + sgn * h2C), f2b = safeEval(f, ePt + sgn * 2 * h2C);
+        if (!isFinite(f1a) || !isFinite(f1b) || !isFinite(f2a) || !isFinite(f2b)) return true;
+        var dNear = Math.abs(f1b - f1a) / h1C;
+        var dMid = Math.abs(f2b - f2a) / h2C;
+        return dNear > 4 * Math.max(dMid, 1e-12) && dNear > 10;
+      };
+      var splitLoCol = endNonSmooth(true);
+      var splitHiCol = endNonSmooth(false);
+      if ((splitLoCol || splitHiCol) && Wcol > 0) {
+        var colW = Math.min(2, 0.05 * Wcol);
+        var colPts = [a];
+        if (splitLoCol) colPts.push(a + colW);
+        if (splitHiCol && (!splitLoCol || b - colW > a + colW + 1e-6 * Wcol)) colPts.push(b - colW);
+        colPts.push(b);
+        if (colPts.length >= 3) {
+          var cVal = 0, cSig = 0, cEvals = 0, cSegs = 0, cOk = true;
+          for (var colI = 0; colI + 1 < colPts.length; colI++) {
+            var subC = integrate(f, colPts[colI], colPts[colI + 1], Object.assign({}, opt, { _depth: depth + 1, _noInteriorSplit: true }));
+            if (subC.verdict === 'divergent' || subC.verdict === 'oscillatory') return subC;
+            if (subC.verdict !== 'ok') cOk = false;
+            cVal += subC.value; cSig += subC.sigma; cEvals += subC.evals; cSegs += subC.segments;
+          }
+          var cScale = Math.max(Math.abs(cVal), 1e-300);
+          var cDig = cSig > 0 ? Math.max(0, -Math.log10(cSig / cScale)) : 16;
+          return {
+            value: cVal, sigma: cSig, digits: Math.min(17, cDig),
+            valueText: null, hpDigits: null, isNearZero: false,
+            a: a, b: b, verdict: cOk ? 'ok' : 'uncertain',
+            notes: notes.concat(['检测到有限高频区间端点非解析（导数呈分支奇异增长），已剥离边界颈区与光滑主体分段求积。']),
+            slopes: { lo: diag.slopeLo, hi: diag.slopeHi },
+            evals: cEvals, transformLabel: tr.label, segments: cSegs,
+            method: '端点颈区剥离 + 分段复合求积', signChanges: diag.signChanges,
+            errorType: '估计界（颈区与光滑段误差之和，非严格保证）'
+          };
+        }
+      }
+    }
+
     /* 8. 有限区间光滑高频振荡快速通道（16 点复合 Gauss-Legendre，避免 4 阶 Simpson 爆炸） */
     if (isFinite(a) && isFinite(b) && diag.signChanges >= 40 && mLo === 1 && mHi === 1 &&
         !diag.endLo.integrableSingularity && !diag.endHi.integrableSingularity && diag.badCount === 0) {
       var glRes = integrateHighFreqGL(tr.g, tr.lo, tr.hi, diag.signChanges);
       if (glRes && isFinite(glRes.value)) {
-        var glScale = Math.max(Math.abs(glRes.value), glRes.absSum, 1e-300);
+        var glNearZ = Math.abs(glRes.value) <= glRes.sigma && glRes.sigma < 1e-11 * Math.max(Math.abs(glRes.value), glRes.absSum, 1e-300);
+        var glScale = (!glNearZ && Math.abs(glRes.value) > 10 * glRes.sigma)
+          ? Math.max(Math.abs(glRes.value), 1e-300)
+          : Math.max(Math.abs(glRes.value), glRes.absSum, 1e-300);
         var glDig = glRes.sigma > 0 ? Math.max(0, -Math.log10(glRes.sigma / glScale)) : 16;
-        var glNearZ = Math.abs(glRes.value) <= glRes.sigma && glRes.sigma < 1e-11 * glScale;
         return {
           value: glNearZ ? 0 : glRes.value, sigma: glRes.sigma,
           digits: Math.min(17, glDig), valueText: glNearZ ? '0' : null, hpDigits: null,
@@ -1944,6 +2379,7 @@
         endFloor = Math.max(endFloor, Math.pow(8 * Number.EPSILON * Math.max(Math.abs(b), 1), qHi) / Math.max(0.05, qHi));
       }
       var sg = Math.max(resFine.err * 16, fl, 1e-15 * Math.abs(v0), tl, endFloor);
+      if (resFine.evalCapped) sg = Math.max(sg, 0.05 * Math.max(resFine.absSum, Math.abs(v0)));
       if (trim) sg = Math.max(sg, trim.dropped);
       return sg;
     }
@@ -2015,7 +2451,9 @@
       (Math.min(origSlopeLo, origSlopeHi) < -0.82) && (fine.capped || digitsD < 6);
 
     var hp = null;
-    if (hasHP) {
+    var hasPeriodicKink = hasStrictKink && (isFinite(a) !== isFinite(b)) &&
+      f.src && /\b(abs|sign|min|max)\s*\([^)]*(sin|cos|tan)/i.test(f.src);
+    if (hasHP && !hasPeriodicKink) {
       try {
         hp = ROOT.IntegralHP.integrate(f, aRaw, bRaw, {
           digits: opt._hpDigits || 25,
@@ -2066,6 +2504,42 @@
           }
         }
       }
+    }
+
+    /* 10c. 半无穷周期折点/阶跃指数衰减 25 位精化（如旗舰加号例题 abs(sin x)/(e^x + abs(sin x+cos x))） */
+    if ((!hpAccept || hpSuspect || (hp && hp.digits < 16)) && hasStrictKink && (isFinite(a) !== isFinite(b)) &&
+        ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integratePeriodicKinkExpTail && f.src) {
+      var kHp = null;
+      try { kHp = ROOT.IntegralHP.integratePeriodicKinkExpTail(f, aRaw, bRaw, { digits: opt._hpDigits || 25, maxMs: 2200 }); }
+      catch (e) { kHp = null; }
+      if (kHp && isFinite(kHp.value) && kHp.digits >= 18) {
+        var kGap = Math.abs(kHp.value - value);
+        var kScale = Math.max(Math.abs(value), Math.abs(kHp.value), fine.absSum, kHp.absInt || 0, 1e-300);
+        var kFineUnrel = fine.bad || fine.capped || sigma > 0.01 * Math.max(Math.abs(value), 1e-300);
+        if (kFineUnrel || kGap / kScale <= 1e-6 || kGap <= 16 * sigma) {
+          hp = kHp;
+          hpAccept = true;
+          hpSuspect = false;
+        }
+      }
+    }
+    if (!hp && hasHP && hasPeriodicKink) {
+      try {
+        hp = ROOT.IntegralHP.integrate(f, aRaw, bRaw, {
+          digits: opt._hpDigits || 25,
+          maxLevel: opt._hpMaxLevel || 6,
+          fastPrec: !!opt._hpFastPrec,
+          maxMs: isLikelyLogTail ? 650 : 1800,
+          singularitySlopeLo: isFinite(a) ? origSlopeLo : undefined,
+          singularitySlopeHi: isFinite(b) ? origSlopeHi : undefined
+        });
+        if (hp && isFinite(hp.value) && hp.digits > 12) {
+          hpAccept = true;
+          hpGap = Math.abs(hp.value - value);
+          hpRel = hpGap / Math.max(Math.abs(value), Math.abs(hp.value), fine.absSum, hp.absInt || 0, 1e-300);
+          hpSuspect = !fineUnreliable && isFinite(value) && hpRel > 1e-6 && hpGap > 8 * sigma;
+        }
+      } catch (e) { hp = null; }
     }
 
     /* 若未采用 HP（失败或疑似假收敛），且尚未跑全精度双精度档，则升级重跑并复核 */
