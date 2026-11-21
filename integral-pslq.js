@@ -295,15 +295,15 @@
     if (!isFinite(lastInfo.value) || lastInfo.value === 0) return [];
 
     var o = opt || {};
-    var availDigits = Math.min(lastInfo.digits || 25, 31);
+    var availDigits = Math.min(lastInfo.digits || 25, 38);
     var oldPrec = D.precision;
-    D.set({ precision: 56 });
+    D.set({ precision: availDigits > 30 ? 64 : 56 });
     try {
       var xDec = new D(String(lastInfo.valueText));
       if (!xDec.isFinite() || xDec.isZero()) return [];
       var absXDec = xDec.abs();
       var absXNum = absXDec.toNumber();
-      var sigEff = Math.max(lastInfo.sigma || 0, absXNum * Math.pow(10, -Math.min(availDigits, 25)));
+      var sigEff = Math.max(lastInfo.sigma || 0, absXNum * Math.pow(10, -Math.min(availDigits, 38)));
       var errTol = Math.max(200 * sigEff, absXNum * Math.pow(10, -(availDigits - 2.2)));
       var minSurplus = o.minSurplus || 6.0;
 
@@ -315,8 +315,8 @@
         if (!rhsDec || !rhsDec.isFinite()) return;
         var err = xDec.minus(rhsDec).abs().toNumber();
         if (!isFinite(err) || err > errTol) return;
-        var matchedDigRaw = err > 0 ? Math.max(0, -Math.log10(err / Math.max(absXNum, 1e-300))) : Math.min(availDigits, 31);
-        var matchedDigGate = Math.min(matchedDigRaw, availDigits + 2.0, 31);
+        var matchedDigRaw = err > 0 ? Math.max(0, -Math.log10(err / Math.max(absXNum, 1e-300))) : Math.min(availDigits, 38);
+        var matchedDigGate = Math.min(matchedDigRaw, availDigits + 2.0, 38);
         var gateSurplus = matchedDigGate - mdlComplexity;
         if (gateSurplus < minSurplus) return;
 
@@ -329,7 +329,7 @@
           expr: exprText,
           fullText: '项数 ' + terms + '；高度 ' + height + '；' + familyNote +
             '；55位残差 ' + err.toExponential(2) + '（净压缩 +' + gateSurplus.toFixed(1) + ' 位）',
-          valueText: rhsDec.toSignificantDigits(31).toFixed(),
+          valueText: rhsDec.toSignificantDigits(Math.max(31, Math.ceil(availDigits) + 4)).toFixed(),
           delta: err,
           verified: true,
           terms: terms,
@@ -398,7 +398,7 @@
       }
 
       /* ===== S2.1：多族高精度 BigInt LLL 线性组合（每组维数 <= 9 保证高信噪比） ===== */
-      var scaleD = Math.min(28, Math.max(12, Math.floor(availDigits) - 1));
+      var scaleD = Math.min(34, Math.max(12, Math.floor(availDigits) - 1));
       var Wscale = new D(10).pow(scaleD);
 
       function runBasisLLL(basisList, maxHeight, maxTerms, familyNote) {
@@ -712,8 +712,8 @@
             var polyStr = polyTerms.join('') + ' = 0';
             var polyErr = xDec.minus(rootDec).abs().toNumber();
             if (polyErr <= errTol) {
-              var pMatch = polyErr > 0 ? Math.max(0, -Math.log10(polyErr / Math.max(absXNum, 1e-300))) : Math.min(availDigits, 31);
-              var pMatchGate = Math.min(pMatch, availDigits + 2.0, 31);
+              var pMatch = polyErr > 0 ? Math.max(0, -Math.log10(polyErr / Math.max(absXNum, 1e-300))) : Math.min(availDigits, 38);
+              var pMatchGate = Math.min(pMatch, availDigits + 2.0, 38);
               if (pMatchGate - mdlA >= minSurplus && !seenExpr[polyStr]) {
                 seenExpr[polyStr] = true;
                 out.push({
@@ -721,7 +721,7 @@
                   expr: polyStr,
                   polyCoeffs: acf.map(function (z) { return Number(z); }),
                   fullText: '次数 ' + sp.deg + '；高度 ' + aMax + '；最小多项式根（55位残差 ' + polyErr.toExponential(2) + '）',
-                  valueText: rootDec.toSignificantDigits(31).toFixed(),
+                  valueText: rootDec.toSignificantDigits(Math.max(31, Math.ceil(availDigits) + 4)).toFixed(),
                   delta: polyErr,
                   verified: true,
                   terms: aInts.length,

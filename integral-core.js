@@ -365,7 +365,7 @@
     var counter = {
       n: 0, err: 0, bad: false, capped: false, evalCapped: false, openEnd: false,
       maxEvals: maxEvals || 450000,
-      deadline: Date.now() + 2000
+      deadline: Date.now() + 20000
     };
     var md = maxDepth || 24;
     for (var k = 0; k < segments; k++) {
@@ -1603,6 +1603,10 @@
   function integrate(f, aRaw, bRaw, options) {
     var opt = options || {};
     var depth = opt._depth || 0;
+    var reqDigits = Math.max(8, Math.min(40, Number(opt._hpDigits || opt.targetDigits) || 25));
+    var reqMaxLevel = opt._hpMaxLevel || (reqDigits <= 12 ? 4 : reqDigits <= 25 ? 6 : 8);
+    var reqFastPrec = (typeof opt._hpFastPrec === 'boolean') ? opt._hpFastPrec : (reqDigits <= 18);
+    var reqMaxEvals = reqDigits > 25 ? 12000 : 4500;
     var a = typeof aRaw === 'number' ? aRaw : parseBound(aRaw);
     var b = typeof bRaw === 'number' ? bRaw : parseBound(bRaw);
     if (isNaN(a) || isNaN(b)) throw new Error('无法解析积分限');
@@ -1682,7 +1686,7 @@
     /* 1. 换元感知的高精度 chirp 振荡求积（sin(x²)、sin(2^x) 等） */
     if ((!isFinite(a) || !isFinite(b)) && ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integrateOsc && f.src) {
       var ohp = null;
-      try { ohp = ROOT.IntegralHP.integrateOsc(f, aRaw, bRaw, { digits: 25 }); }
+      try { ohp = ROOT.IntegralHP.integrateOsc(f, aRaw, bRaw, { digits: reqDigits }); }
       catch (e) { ohp = null; }
       if (ohp && ohp.consistent && isFinite(ohp.value)) {
         var digO = ohp.sigma > 0
@@ -1764,8 +1768,8 @@
             if (oHalf.valueText && typeof Decimal !== 'undefined') {
               var oldPS = Decimal.precision;
               try {
-                Decimal.set({ precision: Math.max(oldPS, 40) });
-                symText = oHalf.isNearZero ? '0' : new Decimal(oHalf.valueText).mul(2).toSignificantDigits(31).toFixed();
+                Decimal.set({ precision: Math.max(oldPS, reqDigits + 15) });
+                symText = oHalf.isNearZero ? '0' : new Decimal(oHalf.valueText).mul(2).toSignificantDigits(Math.max(31, reqDigits + 6)).toFixed();
               } catch (e) { symText = null; }
               finally { Decimal.set({ precision: oldPS }); }
             }
@@ -1803,8 +1807,8 @@
           if (oL.valueText && oR.valueText && typeof Decimal !== 'undefined') {
             var oldPrecO = Decimal.precision;
             try {
-              Decimal.set({ precision: Math.max(oldPrecO, 40) });
-              oText = oNearZ ? '0' : new Decimal(oL.valueText).plus(new Decimal(oR.valueText)).toSignificantDigits(31).toFixed();
+              Decimal.set({ precision: Math.max(oldPrecO, reqDigits + 15) });
+              oText = oNearZ ? '0' : new Decimal(oL.valueText).plus(new Decimal(oR.valueText)).toSignificantDigits(Math.max(31, reqDigits + 6)).toFixed();
             } catch (e) { oText = null; }
             finally { Decimal.set({ precision: oldPrecO }); }
           }
@@ -1956,7 +1960,7 @@
         var oscNotes = notes.filter(function (n) { return n.indexOf('发散') < 0; });
         if (ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integrateOscGeneral && f.src && osc.zeros && osc.zeros.length >= 48) {
           var ghp = null;
-          try { ghp = ROOT.IntegralHP.integrateOscGeneral(f, aRaw, bRaw, osc.zeros, { digits: 25 }); }
+          try { ghp = ROOT.IntegralHP.integrateOscGeneral(f, aRaw, bRaw, osc.zeros, { digits: Math.min(reqDigits, 25), maxMs: 20000 }); }
           catch (e) { ghp = null; }
           if (ghp && ghp.consistent && isFinite(ghp.value)) {
             var gGap = Math.abs(ghp.value - osc.value);
@@ -2180,9 +2184,9 @@
         var subOpt = Object.assign({}, opt, {
           _depth: depth + 1,
           _noInteriorSplit: true,
-          _hpDigits: manySplits ? 16 : opt._hpDigits,
-          _hpMaxLevel: manySplits ? 4 : opt._hpMaxLevel,
-          _hpFastPrec: manySplits ? true : opt._hpFastPrec
+          _hpDigits: manySplits ? Math.min(16, reqDigits) : reqDigits,
+          _hpMaxLevel: manySplits ? Math.min(4, reqMaxLevel) : reqMaxLevel,
+          _hpFastPrec: manySplits ? true : reqFastPrec
         });
         for (var pi = 0; pi + 1 < ptsX.length; pi++) {
           var subRes = integrate(f, ptsX[pi], ptsX[pi + 1], subOpt);
@@ -2205,10 +2209,10 @@
         if (canHpSum && allHpTexts.length > 0) {
           var oldPrecSp = Decimal.precision;
           try {
-            Decimal.set({ precision: Math.max(oldPrecSp, 40) });
+            Decimal.set({ precision: Math.max(oldPrecSp, reqDigits + 15) });
             var decSum = new Decimal(0);
             for (var hpIdx = 0; hpIdx < allHpTexts.length; hpIdx++) decSum = decSum.plus(new Decimal(allHpTexts[hpIdx]));
-            valTextSp = nearZSp ? '0' : decSum.toSignificantDigits(31).toFixed();
+            valTextSp = nearZSp ? '0' : decSum.toSignificantDigits(Math.max(31, reqDigits + 6)).toFixed();
           } catch (e) {
             valTextSp = null;
           } finally {
@@ -2220,7 +2224,7 @@
         return {
           value: nearZSp ? 0 : totalVal, sigma: totalSig,
           digits: Math.min(valTextSp ? 40 : 17, digSp),
-          valueText: valTextSp, hpDigits: valTextSp ? Math.min(25, digSp) : null,
+          valueText: valTextSp, hpDigits: valTextSp ? Math.min(reqDigits, digSp) : null,
           isNearZero: nearZSp,
           a: a, b: b, verdict: allOk ? 'ok' : 'uncertain',
           notes: notes.filter(function (n) { return n.indexOf('NaN/Inf') < 0 && n.indexOf('峰值') < 0; }).concat([
@@ -2416,7 +2420,7 @@
         }
         if (ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integratePosOsc && f.src) {
           var php = null;
-          try { php = ROOT.IntegralHP.integratePosOsc(f, aRaw, bRaw, posOsc.minimaX, { digits: 25 }); }
+          try { php = ROOT.IntegralHP.integratePosOsc(f, aRaw, bRaw, posOsc.minimaX, { digits: Math.min(reqDigits, 25), maxMs: 20000 }); }
           catch (e) { php = null; }
           if (php && php.consistent && isFinite(php.value)) {
             var pGap = Math.abs(php.value - value);
@@ -2443,23 +2447,25 @@
       }
     }
 
-    /* 10. 高精度精化：tanh-sinh / exp-sinh / sinh-sinh（对疑似对数慢尾限制 expSinh 时限以便快速交棒 10b） */
+    /* 10. 高精度精化：按求值次数上限控制（不再用短壁钟时间误杀慢设备） */
     var slowInf = (isFinite(a) !== isFinite(b)) && ((b === Infinity && origSlopeHi < -0.65) || (a === -Infinity && origSlopeLo < -0.65));
     var slowFinLo = isFinite(a) && isFinite(b) && origSlopeLo < -0.70 && origSlopeHi > -0.35;
     var slowFinHi = isFinite(a) && isFinite(b) && origSlopeHi < -0.70 && origSlopeLo > -0.35;
     var isLikelyLogTail = (slowInf || slowFinLo || slowFinHi) &&
       (Math.min(origSlopeLo, origSlopeHi) < -0.82) && (fine.capped || digitsD < 6);
+    var skipHpForLowTarget = reqDigits <= 12 && !fine.bad && !fine.capped && digitsD >= 11.5 && diag.verdict === 'ok';
 
     var hp = null;
     var hasPeriodicKink = hasStrictKink && (isFinite(a) !== isFinite(b)) &&
       f.src && /\b(abs|sign|min|max)\s*\([^)]*(sin|cos|tan)/i.test(f.src);
-    if (hasHP && !hasPeriodicKink) {
+    if (hasHP && !hasPeriodicKink && !skipHpForLowTarget) {
       try {
         hp = ROOT.IntegralHP.integrate(f, aRaw, bRaw, {
-          digits: opt._hpDigits || 25,
-          maxLevel: opt._hpMaxLevel || 6,
-          fastPrec: !!opt._hpFastPrec,
-          maxMs: isLikelyLogTail ? 650 : 2500,
+          digits: reqDigits,
+          maxLevel: isLikelyLogTail ? Math.min(6, reqMaxLevel) : reqMaxLevel,
+          maxEvals: isLikelyLogTail ? ((isFinite(a) && isFinite(b)) ? 1600 : 900) : reqMaxEvals,
+          fastPrec: reqFastPrec,
+          maxMs: 25000,
           singularitySlopeLo: isFinite(a) ? origSlopeLo : undefined,
           singularitySlopeHi: isFinite(b) ? origSlopeHi : undefined
         });
@@ -2468,7 +2474,7 @@
 
     var hpUsed = false;
     var hpSuspect = false;
-    var hpAccept = !!(hp && isFinite(hp.value) && (hp.digits > 12 || (hp.digits >= 7 && (fine.capped || hp.digits > digitsD + 0.5))));
+    var hpAccept = !!(hp && isFinite(hp.value) && (hp.digits > Math.min(12, reqDigits - 1) || (hp.digits >= 7 && (fine.capped || hp.digits > digitsD + 0.5))));
     if (hpAccept) {
       var hpGap = Math.abs(hp.value - value);
       var hpRel = hpGap / Math.max(Math.abs(value), Math.abs(hp.value), fine.absSum, hp.absInt || 0, 1e-300);
@@ -2477,11 +2483,11 @@
     }
 
     /* 10b. 慢衰减 / 迭代对数尾部兜底（1/x^1.02、1/(x ln^1.5 x)、1/(x ln x (ln ln x)^2)、1/(x ln^2(1/x)) 及迭代对数发散） */
-    if ((!hpAccept || hpSuspect || (hp && hp.digits < 12)) &&
+    if ((!hpAccept || hpSuspect || (hp && (hp.budgetHit || hp.digits < (isLikelyLogTail ? 20 : 12)))) &&
         ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integrateLogTailDec && f.src &&
         !diag.endLo.oscillatoryTail && !diag.endHi.oscillatoryTail) {
       if (slowInf || slowFinLo || slowFinHi) {
-        var ltOpt = { digits: 25 };
+        var ltOpt = { digits: Math.min(reqDigits, 25), maxMs: 20000 };
         if (slowFinLo) ltOpt.side = 'lo';
         else if (slowFinHi) ltOpt.side = 'hi';
         var lt = null;
@@ -2497,7 +2503,7 @@
           };
         }
         if (lt && !lt.divergent && isFinite(lt.value) && lt.digits >= 6) {
-          if (!hp || !hpAccept || hpSuspect || lt.digits > hp.digits + 0.5) {
+          if (!hp || !hpAccept || hpSuspect || lt.digits > hp.digits + 0.5 || (hp.budgetHit && lt.digits >= hp.digits - 2)) {
             hp = lt;
             hpAccept = true;
             hpSuspect = false;
@@ -2506,13 +2512,13 @@
       }
     }
 
-    /* 10c. 半无穷周期折点/阶跃指数衰减 25 位精化（如旗舰加号例题 abs(sin x)/(e^x + abs(sin x+cos x))） */
-    if ((!hpAccept || hpSuspect || (hp && hp.digits < 16)) && hasStrictKink && (isFinite(a) !== isFinite(b)) &&
+    /* 10c. 半无穷周期折点/阶跃指数衰减精化（按 reqDigits 适配 12/18/25/35 位） */
+    if ((!hpAccept || hpSuspect || (hp && hp.digits < Math.min(16, reqDigits))) && hasStrictKink && (isFinite(a) !== isFinite(b)) &&
         ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integratePeriodicKinkExpTail && f.src) {
       var kHp = null;
-      try { kHp = ROOT.IntegralHP.integratePeriodicKinkExpTail(f, aRaw, bRaw, { digits: opt._hpDigits || 25, maxMs: 2200 }); }
+      try { kHp = ROOT.IntegralHP.integratePeriodicKinkExpTail(f, aRaw, bRaw, { digits: reqDigits, maxMs: 25000 }); }
       catch (e) { kHp = null; }
-      if (kHp && isFinite(kHp.value) && kHp.digits >= 18) {
+      if (kHp && isFinite(kHp.value) && kHp.digits >= Math.min(18, reqDigits - 1)) {
         var kGap = Math.abs(kHp.value - value);
         var kScale = Math.max(Math.abs(value), Math.abs(kHp.value), fine.absSum, kHp.absInt || 0, 1e-300);
         var kFineUnrel = fine.bad || fine.capped || sigma > 0.01 * Math.max(Math.abs(value), 1e-300);
@@ -2523,27 +2529,29 @@
         }
       }
     }
-    if (!hp && hasHP && hasPeriodicKink) {
+    if (!hp && hasHP && hasPeriodicKink && !skipHpForLowTarget) {
       try {
         hp = ROOT.IntegralHP.integrate(f, aRaw, bRaw, {
-          digits: opt._hpDigits || 25,
-          maxLevel: opt._hpMaxLevel || 6,
-          fastPrec: !!opt._hpFastPrec,
-          maxMs: isLikelyLogTail ? 650 : 1800,
+          digits: reqDigits,
+          maxLevel: isLikelyLogTail ? 4 : reqMaxLevel,
+          maxEvals: isLikelyLogTail ? 900 : reqMaxEvals,
+          fastPrec: reqFastPrec,
+          maxMs: 25000,
           singularitySlopeLo: isFinite(a) ? origSlopeLo : undefined,
           singularitySlopeHi: isFinite(b) ? origSlopeHi : undefined
         });
-        if (hp && isFinite(hp.value) && hp.digits > 12) {
+        if (hp && isFinite(hp.value) && hp.digits > Math.min(12, reqDigits - 1)) {
           hpAccept = true;
           hpGap = Math.abs(hp.value - value);
           hpRel = hpGap / Math.max(Math.abs(value), Math.abs(hp.value), fine.absSum, hp.absInt || 0, 1e-300);
-          hpSuspect = !fineUnreliable && isFinite(value) && hpRel > 1e-6 && hpGap > 8 * sigma;
+          var fineUnrelK = fine.bad || fine.capped || sigma > 0.01 * Math.max(Math.abs(value), 1e-300);
+          hpSuspect = !fineUnrelK && isFinite(value) && hpRel > 1e-6 && hpGap > 8 * sigma;
         }
       } catch (e) { hp = null; }
     }
 
     /* 若未采用 HP（失败或疑似假收敛），且尚未跑全精度双精度档，则升级重跑并复核 */
-    if ((!hpAccept || hpSuspect) && !usedFullFine) {
+    if ((!hpAccept || hpSuspect) && !usedFullFine && !skipHpForLowTarget) {
       fine = integrateOnce(tr.g, tr.lo, tr.hi, 1e-13, baseSegs, 22, 450000);
       value = fine.value;
       sigma = computeDoubleSigma(fine);
@@ -2552,7 +2560,7 @@
         ? Math.max(Math.abs(value), 1e-300)
         : Math.max(Math.abs(value), fine.absSum, 1e-300);
       digitsD = sigma > 0 ? Math.max(0, -Math.log10(sigma / scaleD)) : 16;
-      hpAccept = !!(hp && isFinite(hp.value) && (hp.digits > 12 || (hp.digits >= 6 && (fine.capped || hp.digits > digitsD + 0.5))));
+      hpAccept = !!(hp && isFinite(hp.value) && (hp.digits > Math.min(12, reqDigits - 1) || (hp.digits >= 6 && (fine.capped || hp.digits > digitsD + 0.5))));
       if (hpAccept) {
         hpGap = Math.abs(hp.value - value);
         hpRel = hpGap / Math.max(Math.abs(value), Math.abs(hp.value), fine.absSum, hp.absInt || 0, 1e-300);
@@ -2618,7 +2626,8 @@
 
   function formatValue(value, sigma, valueText) {
     if (valueText === '0' || value === 0) return '0';
-    var d = sigma > 0 ? Math.max(6, Math.min(30, Math.ceil(-Math.log10(sigma)) + 2)) : 17;
+    var relSig = sigma > 0 ? sigma / Math.max(Math.abs(value), 1e-300) : 0;
+    var d = relSig > 0 ? Math.max(6, Math.min(40, Math.ceil(-Math.log10(relSig)) + 2)) : 17;
     if (valueText && typeof Decimal !== 'undefined') {
       try { return new Decimal(String(valueText)).toSignificantDigits(d).toString(); } catch (e) {}
     }

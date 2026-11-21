@@ -199,12 +199,52 @@
 
   <style>
     #integralPanel{margin:0 0 16px}
-    .ig-panel{display:grid;gap:10px;padding:14px}
+    #riesSection[hidden],#igStop[hidden],.ig-panel [hidden]{display:none!important}
+    .ig-panel{display:grid;gap:10px;padding:12px 14px}
     .ig-row{display:grid;grid-template-columns:minmax(0,1fr) 88px 88px;gap:8px;align-items:end}
     .ig-row label{display:grid;gap:4px;font-size:12px;color:var(--muted);font-weight:700}
     .ig-row input{font-family:"Courier New",ui-monospace,monospace;font-size:15px;padding:9px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;width:100%;box-sizing:border-box}
-    .ig-btns{display:flex;gap:8px;flex-wrap:wrap}
-    .ig-btns .button{min-height:38px;padding:7px 13px;font-size:13px}
+    .ig-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:stretch;padding:10px 12px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.78)}
+    .ig-ctrl-block{display:grid;gap:6px;min-width:0;align-content:center}
+    .ig-ctrl-label{font-size:11.5px;color:var(--muted);font-weight:750;letter-spacing:.03em}
+    .ig-seg{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+    .ig-seg button{appearance:none;border:1px solid var(--line);background:#f8fafc;color:#334155;border-radius:11px;padding:7px 8px;font-size:12.5px;font-weight:750;cursor:pointer;line-height:1.25;display:grid;gap:1px;text-align:center;transition:all .15s ease}
+    .ig-seg button small{font-size:10.5px;font-weight:600;color:var(--muted)}
+    .ig-seg button:hover{border-color:rgba(14,116,144,.40);background:#f0f9ff}
+    .ig-seg button.is-active{background:linear-gradient(135deg,#0e7490,#0284c7);border-color:#0e7490;color:#fff;box-shadow:0 4px 12px rgba(14,116,144,.22)}
+    .ig-seg button.is-active small{color:rgba(255,255,255,.9)}
+    .ig-switch-wrap{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border:1px solid var(--line);border-radius:13px;background:#f8fafc;cursor:pointer;user-select:none}
+    .ig-switch-copy{display:grid;gap:2px}
+    .ig-switch-copy strong{font-size:13px;color:#0f172a}
+    .ig-switch-copy span{font-size:11.5px;color:var(--muted)}
+    .ig-switch{position:relative;display:inline-flex;align-items:center;width:44px;height:24px;flex:0 0 auto}
+    .ig-switch input{opacity:0;width:0;height:0;position:absolute}
+    .ig-slider{position:absolute;inset:0;background:#cbd5e1;border-radius:999px;transition:background .18s ease}
+    .ig-slider::before{content:'';position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(15,23,42,.22);transition:transform .18s ease}
+    .ig-switch input:checked + .ig-slider{background:#0e7490}
+    .ig-switch input:checked + .ig-slider::before{transform:translateX(20px)}
+    .ig-switch input:focus-visible + .ig-slider{outline:2px solid #0284c7;outline-offset:2px}
+    .ig-guide{border:1px solid var(--line);border-radius:14px;padding:9px 12px;font-size:12.5px;line-height:1.55;display:grid;gap:2px;background:#f8fafc;color:#334155}
+    .ig-guide strong{font-size:13px}
+    .ig-guide.ok{border-color:rgba(21,128,61,.26);background:#f0fdf4;color:#166534}
+    .ig-guide.ok strong{color:#15803d}
+    .ig-guide.warn{border-color:rgba(217,119,6,.32);background:#fffbeb;color:#92400e}
+    .ig-guide.warn strong{color:#b45309}
+    .ig-guide.info{border-color:rgba(14,116,144,.25);background:#f0f9ff;color:#075985}
+    .ig-guide.info strong{color:#0e7490}
+    .ig-help{border:1px dashed rgba(148,163,184,.55);border-radius:14px;background:rgba(255,255,255,.68);font-size:12.5px;color:#475569}
+    .ig-help summary{cursor:pointer;padding:8px 12px;font-weight:700;color:#0f172a;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:8px}
+    .ig-help summary::-webkit-details-marker{display:none}
+    .ig-help summary::after{content:'展开对比';font-size:11.5px;color:var(--accent);font-weight:700;flex:0 0 auto}
+    .ig-help[open] summary::after{content:'收起'}
+    .ig-help-body{padding:0 12px 10px;display:grid;gap:8px}
+    .ig-help-table{width:100%;border-collapse:collapse;font-size:12px}
+    .ig-help-table th,.ig-help-table td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+    .ig-help-table th{color:var(--muted);font-weight:700;white-space:nowrap}
+    .ig-btn-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+    .ig-actions,.ig-examples{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .ig-btn-bar .button{min-height:38px;padding:7px 13px;font-size:13px}
+    #igStop{border-color:rgba(220,38,38,.35);color:#b91c1c;background:#fff7f7}
     .ig-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px}
     .ig-cell{background:#fff;border:1px solid var(--line);border-radius:14px;padding:10px;display:grid;gap:4px}
     .ig-cell span{font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.04em}
@@ -215,7 +255,8 @@
     #igCandidates .table-wrap{margin-top:8px}
     #igCandidates table{width:100%;border-collapse:collapse}
     #igCandidates td{padding:8px 9px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
-    #igCandidates th{font-size:12px;text-align:left;color:var(--muted);padding:6px 9px}
+    #igCandidates th{font-size:12px;text-align:left;color:var(--muted);padding:6px 9px;white-space:nowrap}
+    #igCandidates td:nth-child(2),#igCandidates td:nth-child(3){white-space:nowrap}
     #igCandidates code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px}
     #igResult .subtle-note,#igCandidates .subtle-note{font-size:12.5px;line-height:1.55}
     .ig-sym{border-color:rgba(21,128,61,.30);background:linear-gradient(135deg,rgba(240,253,244,.96),rgba(255,255,255,.92));display:grid;gap:7px;}
@@ -225,25 +266,86 @@
     .ig-sym-foot{color:#475569;font-size:12.5px;line-height:1.6;display:grid;gap:3px;overflow-x:auto;}
     .ig-sym-foot b{color:#0f172a;font-weight:700;}
     .status-line.ok{border-color:rgba(21,128,61,.30);background:#f0fdf4;color:#15803d;}
-    @media(max-width:560px){.ig-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.ig-row label:first-child{grid-column:1/-1}.ig-btns .button{min-height:44px;flex:1 1 auto}}
+    @media(max-width:720px){.ig-controls{grid-template-columns:1fr}}
+    @media(max-width:560px){
+      .ig-panel{padding:8px 2px}
+      .ig-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+      .ig-row label:first-child{grid-column:1/-1}
+      .ig-controls{padding:10px}
+      .ig-seg{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .ig-seg button{min-height:42px}
+      .ig-btn-bar{display:grid;grid-template-columns:1fr;gap:8px}
+      .ig-actions{display:flex;gap:8px}
+      #igRun{flex:1 1 auto;min-height:44px}
+      #igStop{min-height:44px}
+      .ig-examples{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+      .ig-examples .button{min-height:40px;padding:6px 4px;font-size:12px;line-height:1.25;white-space:normal;text-align:center}
+      #igCandidates th,#igCandidates td{padding:7px 6px;font-size:12.5px}
+      #igCandidates code{font-size:12.5px}
+    }
   </style>
 </head>
 <body>
   
   <main class="page-shell">
     <section class="solve-card glass-card content-card" id="integralPanel">
-      <div class="ries-kicker"><span>定积分层</span><strong>定积分 → 符号解 + 小数 + 闭式候选</strong><em>v2.16 · 三支柱架构（高精度求积 + 确定性 BigInt PSLQ + 50位 Fail-Closed 复核与 MDL 评分）· 复用原版 RIES 12.0.2</em></div>
+      <div class="ries-kicker"><span>定积分层</span><strong>定积分 → 符号解 + 小数 + 闭式候选</strong><em>v2.17 · 后台多线程求积 + 可选数值精度/闭式开关 + 三支柱复核 · 复用原版 RIES 12.0.2</em></div>
       <div class="ig-panel">
         <div class="ig-row">
           <label>f(x)<input id="igF" value="abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" placeholder="如 abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" spellcheck="false"></label>
           <label>a<input id="igA" value="0" spellcheck="false"></label>
           <label>b<input id="igB" value="inf" spellcheck="false"></label>
         </div>
-        <div class="ig-btns">
-          <button class="button primary" id="igRun" type="button">计算并求闭式</button>
-          <button class="button" id="igExPlus" type="button">加号例题</button>
-          <button class="button" id="igExMinus" type="button">减号例题（发散）</button>
-          <button class="button" id="igExSimple" type="button">高斯积分</button>
+        <div class="ig-controls">
+          <div class="ig-ctrl-block">
+            <span class="ig-ctrl-label">数值积分目标精度（决定求积深度与后台预算）</span>
+            <div class="ig-seg" id="igPrecGroup" role="group" aria-label="数值积分目标精度">
+              <button type="button" data-prec="12" aria-pressed="false">12 位<small>极速预览</small></button>
+              <button type="button" data-prec="18" aria-pressed="false">18 位<small>双精度快</small></button>
+              <button type="button" data-prec="25" class="is-active" aria-pressed="true">25 位<small>推荐</small></button>
+              <button type="button" data-prec="35" aria-pressed="false">35 位<small>超高精度</small></button>
+            </div>
+          </div>
+          <label class="ig-switch-wrap" for="igClosedToggle">
+            <div class="ig-switch-copy">
+              <strong>闭式搜索</strong>
+              <span>符号解 · PSLQ · RIES</span>
+            </div>
+            <span class="ig-switch">
+              <input id="igClosedToggle" type="checkbox" checked>
+              <span class="ig-slider" aria-hidden="true"></span>
+            </span>
+          </label>
+        </div>
+        <div id="igGuide" class="ig-guide ok"><strong>推荐平衡档 · 25 位数值 + 三支柱全开（PSLQ + 52 位 Fail-Closed）</strong><span>默认推荐：在后台 Worker 跑完与桌面一致的高精度预算（不卡顿主界面），满足 PSLQ 深定标与 ≥17.5 位 52 位独立复核硬门槛，兼顾召回率与防误导。</span></div>
+        <details class="ig-help">
+          <summary>精度档位与「闭式搜索」开关使用指南（修改前必读）</summary>
+          <div class="ig-help-body">
+            <p class="subtle-note">自 v2.17 起，数值求积与确定性 PSLQ 运行在后台独立线程（Web Worker），手机与低配电脑也能跑完与桌面一致的深度，不再因卡顿被强行腰斩。</p>
+            <div class="table-wrap">
+              <table class="ig-help-table">
+                <thead><tr><th>精度档</th><th>数值层表现</th><th>对 PSLQ 与 Fail-Closed 复核的影响</th><th>耗时与适用场景</th></tr></thead>
+                <tbody>
+                  <tr><td><b>12 位</b></td><td>自适应双精度快速收敛</td><td>确定性 PSLQ 不启动（&lt;14.5 位门槛）；RIES 低位巧合难以被高位复核拦截</td><td>极快（毫秒级），仅建议配合「纯数值模式」预览</td></tr>
+                  <tr><td><b>18 位</b></td><td>中深层高精度求积</td><td>PSLQ 启用但定标深度较浅（≤14 位），复杂线性组合可能漏检；接近 17.5 位强复核边界</td><td>较快，适合常规初等定积分验证</td></tr>
+                  <tr><td><b>25 位（推荐）</b></td><td>默认 25+ 位稳定输出</td><td>满足深定标 PSLQ 与 ≥17.5 位 52 位 Fail-Closed 强复核硬门槛，不易假阳性</td><td>通常数百毫秒，手机与桌面均稳妥</td></tr>
+                  <tr><td><b>35 位</b></td><td>超深层级数与 35+ 位小数</td><td>PSLQ 定标上限升至 34 位，极限校验高系数/高难度常数组合</td><td>手机或分段振荡积分需数秒至十余秒，可点「停止计算」</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="subtle-note"><b>关于关闭「闭式搜索」开关：</b>当您只想求定积分的高精度小数与发散/振荡诊断、不想看猜想方程或「推测概率」时，请关闭此开关进入「纯数值模式」。页面会自动隐藏符号层与闭式候选面板并跳过相关计算。</p>
+          </div>
+        </details>
+        <div class="ig-btn-bar">
+          <div class="ig-actions">
+            <button class="button primary" id="igRun" type="button">计算并求闭式</button>
+            <button class="button" id="igStop" type="button" hidden disabled>停止计算</button>
+          </div>
+          <div class="ig-examples">
+            <button class="button" id="igExPlus" type="button">加号例题</button>
+            <button class="button" id="igExMinus" type="button">减号（发散）</button>
+            <button class="button" id="igExSimple" type="button">高斯积分</button>
+          </div>
         </div>
         <div id="igStatus" class="notice status-line">就绪。支持 + - * / ^、abs/sin/cos/exp/log/sqrt 等；变量只能写 x。</div>
         <div id="igSymbolic" class="hp-panel ig-sym" hidden>
@@ -255,13 +357,13 @@
         <div id="igResult" class="hp-panel" hidden><div id="igOut"></div></div>
         <div id="igCandidates" class="results-panel" hidden>
           <h2 class="compact-title">闭式候选</h2>
-          <p class="subtle-note">候选由高精度确定性 PSLQ 引擎 + 原版 RIES 12.0.2 联合给出；「推测概率」基于 52 位 Fail-Closed 独立复核、积分结构先验与 MDL 最小描述长度净信息压缩计算，不是数学证明。<b>未通过高精度复核者（≥17.5 位时）强制封顶 ≤35%；等价积分/级数变形与高自由度「参数化拟合」均不算闭式</b>，请优先核对「独立复核」列。</p>
+          <p class="subtle-note">v2.17 · 候选由高精度确定性 PSLQ 引擎 + 原版 RIES 12.0.2 联合给出；「推测概率」基于 52 位 Fail-Closed 独立复核、积分结构先验与 MDL 最小描述长度净信息压缩计算，不是数学证明。<b>未通过高精度复核者（≥17.5 位时）强制封顶 ≤35%；等价积分/级数变形与高自由度「参数化拟合」均不算闭式</b>，请优先核对「独立复核」列。</p>
           <div class="table-wrap"><table class="ig-data"><thead><tr><th>候选表达式</th><th>引擎误差</th><th>推测概率</th><th>独立复核</th></tr></thead><tbody id="igCandBody"></tbody></table></div>
         </div>
       </div>
     </section>
 
-    <section class="solve-card glass-card content-card">
+    <section class="solve-card glass-card content-card" id="riesSection">
       <div class="target-row">
         <div><label for="target" class="sr-only">Target</label><input id="target" value="" placeholder="Enter a number or computable expression" inputmode="decimal" autocomplete="off" aria-label="Target expression"></div>
         <div class="target-actions">
@@ -426,11 +528,11 @@
   </main>
   <script defer src="ries-script.js"></script>
   <script defer src="i18n.js"></script>
-  <script defer src="integral-hp.js?v=2.16"></script>
-  <script defer src="integral-core.js?v=2.16"></script>
-  <script defer src="integral-symbolic.js?v=2.16"></script>
-  <script defer src="integral-pslq.js?v=2.16"></script>
-  <script defer src="integral-glue.js?v=2.16"></script>
+  <script defer src="integral-hp.js?v=2.17"></script>
+  <script defer src="integral-core.js?v=2.17"></script>
+  <script defer src="integral-symbolic.js?v=2.17"></script>
+  <script defer src="integral-pslq.js?v=2.17"></script>
+  <script defer src="integral-glue.js?v=2.17"></script>
   <script>
     /* 内联兜底：外部 .js 全部 404 / 被拦截时（如手机上只打开单个 html、
        或浏览器禁止 file:// 读兄弟资源），defer 脚本不会执行，按钮会静默失效。

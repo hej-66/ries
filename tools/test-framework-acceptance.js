@@ -360,9 +360,104 @@ for (const [name, fn, a, b] of pillar3) {
   check(lowOk, 'Low-precision arbitrary-bound fake was not capped <= 0.30');
 }
 
+// =========================================================================
+// 支柱四：预算保存、性能与 12/18/25/35 四档数值精度及交互语义（v2.17）
+// =========================================================================
+console.log('\n[支柱四] 预算保存、性能与 12/18/25/35 精度档位及开关策略测试');
+const HP = globalThis.IntegralHP;
+check(HP && HP.available, 'IntegralHP must be available for Pillar 4');
+
+// 4.1 预算耗尽时保留已完成 prev 层，而非整段作废返回 aborted: true
+{
+  const gAtan = (x) => x.atan();
+  const rTanh = HP.tanhSinh(gAtan, new D(0), new D(1), { digits: 25, maxLevel: 7, maxEvals: 160 });
+  const tanhOk = !!(rTanh && !rTanh.aborted && rTanh.budgetHit && rTanh.level >= 2 && rTanh.prev && rTanh.value.isFinite());
+  console.log(`  [${tanhOk ? 'PASS' : 'FAIL'}] tanhSinh 紧预算保底: aborted=${rTanh && rTanh.aborted}, budgetHit=${rTanh && rTanh.budgetHit}, level=${rTanh && rTanh.level}`);
+  check(tanhOk, 'tanhSinh discarded completed prev level under tight maxEvals');
+
+  const gGauss = (x) => x.mul(x).neg().exp();
+  const rExp = HP.expSinh(gGauss, new D(0), 1, null, { digits: 25, maxLevel: 7, maxEvals: 160 });
+  const expOk = !!(rExp && !rExp.aborted && rExp.budgetHit && rExp.level >= 2 && rExp.prev && rExp.value.isFinite());
+  console.log(`  [${expOk ? 'PASS' : 'FAIL'}] expSinh 紧预算保底: aborted=${rExp && rExp.aborted}, budgetHit=${rExp && rExp.budgetHit}, level=${rExp && rExp.level}`);
+  check(expOk, 'expSinh discarded completed prev level under tight maxEvals');
+}
+
+// 4.2 桌面冷/热旗舰例题 25 位速度与真实精度基准
+{
+  const flagRef = PI.plus(LN2.mul(9)).div(24);
+  const fFlag = C.compile('abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))');
+  const t0 = Date.now();
+  const rFlag = C.integrate(fFlag, '0', 'inf', { targetDigits: 25 });
+  const elapsed = Date.now() - t0;
+  const errNum = new D(rFlag.valueText).minus(flagRef).abs();
+  const trueDig = errNum.isZero() ? 45 : -errNum.div(flagRef).ln().div(new D(10).ln()).toNumber();
+  const ok = rFlag.verdict === 'ok' && rFlag.digits >= 24 && trueDig >= 28 && elapsed < 750;
+  console.log(`  [${ok ? 'PASS' : 'FAIL'}] 旗舰例题 25位基准: time=${elapsed}ms, digits=${rFlag.digits.toFixed(1)}, trueDig=${trueDig.toFixed(1)}`);
+  check(ok, `Flagship 25-digit benchmark failed: elapsed=${elapsed}ms, digits=${rFlag.digits}, trueDig=${trueDig}`);
+}
+
+// 4.3 四档精度 12 / 18 / 25 / 35 横跨 4 个典型积分 + 35位格式化 + 18位 PSLQ 召回
+{
+  const tierCases = [
+    { name: '旗舰例题 (π+9ln2)/24', fn: 'abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))', a: '0', b: 'inf', ref: PI.plus(LN2.mul(9)).div(24) },
+    { name: '高斯积分 √π/2', fn: 'exp(-x^2)', a: '0', b: 'inf', ref: SQRTPI.div(2) },
+    { name: 'Ahmed 积分 5π²/96', fn: 'atan(sqrt(x^2+2))/(sqrt(x^2+2)*(x^2+1))', a: '0', b: '1', ref: PI.pow(2).mul(5).div(96) },
+    { name: 'Dirichlet sin(x)/x π/2', fn: 'sin(x)/x', a: '0', b: 'inf', ref: PI.div(2) }
+  ];
+  const minTrueByTier = { 12: 11.5, 18: 17.5, 25: 24.5, 35: 34.0 };
+  for (const td of [12, 18, 25, 35]) {
+    for (const tc of tierCases) {
+      const f = C.compile(tc.fn);
+      const r = C.integrate(f, tc.a, tc.b, { targetDigits: td });
+      const valStr = r.valueText ? r.valueText : String(r.value);
+      const errD = new D(valStr).minus(tc.ref).abs();
+      const trueDig = errD.isZero() ? 45 : -errD.div(tc.ref).ln().div(new D(10).ln()).toNumber();
+      let extraOk = true;
+      if (td === 35) {
+        const formatted = C.formatValue(r.value, r.sigma, r.valueText);
+        const sigMatch = formatted.replace(/^[-+]?0\.?0*/, '').replace(/[^0-9]/g, '');
+        extraOk = sigMatch.length >= 34;
+      }
+      if (td === 18) {
+        r.profile = glue.analyzeIntegralProfile(tc.fn, tc.a, tc.b, r.slopes);
+        const hits = PSLQ.search(r);
+        const ranked = glue.rankCandidates(hits, r);
+        extraOk = ranked.hasReliableClosed && ranked.rows.some((row) => row.hpCheck && row.hpCheck.status === 'passed');
+      }
+      const ok = r.verdict === 'ok' && trueDig >= minTrueByTier[td] && extraOk;
+      console.log(`  [${ok ? 'PASS' : 'FAIL'}] td=${td} ${tc.name}: report=${r.digits.toFixed(1)}, trueDig=${trueDig.toFixed(1)}, extra=${extraOk}`);
+      check(ok, `Tier td=${td} failed on ${tc.name} (trueDig=${trueDig}, extraOk=${extraOk})`);
+    }
+  }
+}
+
+// 4.4 控制面板引导文案语义与 RIES 方程平凡变形去重
+{
+  const d12On = glue.describeSettingsEffect(12, true);
+  const d25On = glue.describeSettingsEffect(25, true);
+  const d25Off = glue.describeSettingsEffect(25, false);
+  const uiOk = d12On.level === 'warn' && d25On.level === 'ok' && d25Off.buttonText === '计算定积分';
+  console.log(`  [${uiOk ? 'PASS' : 'FAIL'}] 精度与闭式开关后果提示: 12=${d12On.level}, 25=${d25On.level}, offBtn=${d25Off.buttonText}`);
+  check(uiOk, 'describeSettingsEffect contract mismatch');
+
+  const arbProf = glue.analyzeIntegralProfile('exp(-x^2)', '0', '1.37', {});
+  const info11 = { value: 0.390829886609567, sigma: 6.533e-13, digits: 11.8, profile: arbProf };
+  const dupForms = [
+    'RIES 方程： (9/x) = ((7·e)+4)',
+    'RIES 方程： (9/(x+0)) = ((7·e)+4)',
+    'RIES 方程： -((9/x)) = -((7·e)+4)',
+    'RIES 方程： (-(9)/x) = -((7·e)+4)',
+    'RIES 方程： (9/-(x)) = -((7·e)+4)'
+  ].map((formula) => ({ formula, fullText: formula, delta: 8.68e-7, verified: true, terms: 0, height: 9 }));
+  const rankedDup = glue.rankCandidates(dupForms, info11);
+  const dedupOk = rankedDup.rows.length === 1;
+  console.log(`  [${dedupOk ? 'PASS' : 'FAIL'}] RIES 方程平凡变形去重: 5 -> ${rankedDup.rows.length}`);
+  check(dedupOk, `Expected 5 duplicate RIES rows to collapse into 1, got ${rankedDup.rows.length}`);
+}
+
 console.log('\n================================================');
 if (failures === 0) {
-  console.log('ALL THREE PILLARS PASSED ZERO FAILURES.');
+  console.log('ALL FOUR PILLARS PASSED ZERO FAILURES.');
   process.exit(0);
 } else {
   console.error(`TOTAL FAILURES: ${failures}`);

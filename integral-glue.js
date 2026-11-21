@@ -1,14 +1,12 @@
 /* integral-glue.js — 把「定积分数值层」「符号层」「确定性高精度 PSLQ 引擎」「原版 RIES 12.0.2」接入三支柱理论框架。
  * 不修改 ries-script.js 任何一行；只通过 DOM 交互与结果观察接入。
  *
- * v2.16 三支柱架构：
- *  1. 数值层诚实精度：给出 17~31 位高精度真值与保守误差界 σ，作为全流程统计底座。
- *  2. 确定性高精度 PSLQ（integral-pslq.js）：直接在 BigInt LLL 中利用全部 17~31 位有效数搜寻声明空间 S_2，
- *     并与原版 RIES 结果融合排序。
- *  3. Fail-Closed 50 位复核 + MDL 信息压缩后验概率：
- *     - 支持 40+ 经典常数与任意 Γ(p/q)、多项式根的 52 位 Decimal 独立复核；
- *     - 当数值精度 ≥ 17.5 位而候选无法通过高精度复核时（含未知函数或未求值等价积分），置信度强制封顶 35%，
- *       彻底阻断非闭式积分的高概率误导。
+ * v2.17 架构升级：
+ *  1. 数值积分 + 确定性 PSLQ 迁入独立后台 Web Worker（integral-worker.js），彻底解除主线程阻塞并支持随时停止，
+ *     使手机与低配电脑可无损跑完与桌面端完全一致的计算预算；Worker 受限时自动优雅降级回主线程。
+ *  2. 暴露用户可调数值精度（12 / 18 / 25 / 35 位）与「闭式搜索」总开关（纯数值模式 / 闭式模式），
+ *     并在交互前后明确说明精度与开关对 Fail-Closed 门槛、PSLQ 召回及耗时的后果。
+ *  3. RIES 方程同构重复行（如 ±x/x+0 变形）去重折叠与异常中断快照识别。
  */
 (function (global) {
   'use strict';
@@ -22,15 +20,24 @@
   var PSLQ = (isBrowser ? window.IntegralPSLQ : (global.IntegralPSLQ || tryRequirePslq())) || null;
   var $ = function (id) { return isBrowser ? document.getElementById(id) : null; };
   var el = isBrowser ? {
-    f: $('igF'), a: $('igA'), b: $('igB'), run: $('igRun'),
+    f: $('igF'), a: $('igA'), b: $('igB'), run: $('igRun'), stop: $('igStop'),
+    precGroup: $('igPrecGroup'), closedToggle: $('igClosedToggle'), guide: $('igGuide'),
     status: $('igStatus'), result: $('igResult'), out: $('igOut'),
     cand: $('igCandidates'), candBody: $('igCandBody'),
     exPlus: $('igExPlus'), exMinus: $('igExMinus'), exSimple: $('igExSimple'),
-    sym: $('igSymbolic'), symEq: $('igSymEq'), symValue: $('igSymValue'), symFoot: $('igSymFoot')
+    sym: $('igSymbolic'), symEq: $('igSymEq'), symValue: $('igSymValue'), symFoot: $('igSymFoot'),
+    riesSection: $('riesSection')
   } : {};
   var last = null;
+  var lastClosedEnabled = true;
   var riesTarget = null;
   var pslqRows = [];
+  var targetDigitsPref = 25;
+  var closedEnabledPref = true;
+  var numWorker = null;
+  var workerDisabled = false;
+  var activeJobId = 0;
+  var workerPending = null;
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -38,6 +45,7 @@
     });
   }
   function setStatus(text, kind) {
+    if (!el.status) return;
     el.status.textContent = text;
     el.status.className = 'notice status-line' + (kind ? ' ' + kind : '');
   }
@@ -883,6 +891,19 @@
     return parts.core.replace(/\s+/g, '').replace(/·/g, '*').replace(/−/g, '-').replace(/log\(/gi, 'ln(');
   }
 
+  /* 折叠 RIES 方程平凡变形重复行（如 (9/x)=(7e+4)、(9/(x+0))=(7e+4)、-((9/x))=-(7e+4)、(9/-(x))=-(7e+4)） */
+  function riesEqDedupKey(formula, delta) {
+    var f = String(formula || '');
+    if (!/^RIES\s*(?:方程|equation)/i.test(f) || !isFinite(delta)) return null;
+    var body = extractFormulaBodyAndCore(f).body
+      .replace(/−/g, '-')
+      .replace(/log\(/gi, 'ln(')
+      .replace(/\b(x|0)\+0\b|\b0\+(x)\b|\b(x)-0\b/g, '$1$2$3')
+      .replace(/[\s()+\-·*]+/g, '');
+    var dTag = delta === 0 ? '0' : delta.toPrecision(7);
+    return 'REQ:' + body + '|' + dTag;
+  }
+
   function rankCandidates(rawRows, lastInfo) {
     var inputDigits = lastInfo.digits;
     var profile = lastInfo.profile || null;
@@ -932,15 +953,22 @@
       if (a.nonClosed && a.integralForm !== b.integralForm) return a.integralForm ? -1 : 1;
       if (Math.abs((b.p || 0) - (a.p || 0)) > 1e-4) return (b.p || 0) - (a.p || 0);
       if (Math.abs((a.mdlCost || 0) - (b.mdlCost || 0)) > 0.25) return (a.mdlCost || 0) - (b.mdlCost || 0);
-      return (a.delta || 0) - (b.delta || 0);
+      if (Math.abs((a.delta || 0) - (b.delta || 0)) > 1e-15) return (a.delta || 0) - (b.delta || 0);
+      return a.formula.length - b.formula.length;
     });
-    /* PSLQ 与 RIES 若检出完全同构 RHS 表达式，仅保留优先级更高的一条 */
+    /* PSLQ 与 RIES 同构去重，以及 RIES 方程平凡变形（-(-(x)) / x+0）去重 */
     var seenCanon = Object.create(null);
     var deduped = [];
     for (var ri = 0; ri < rows.length; ri++) {
       var row = rows[ri];
       var cKey = (row.nonClosed ? 'N:' : 'C:') + candidateCanonKey(row.formula);
       if (seenCanon[cKey]) continue;
+      var rKey = riesEqDedupKey(row.formula, row.delta);
+      if (rKey) {
+        rKey = (row.nonClosed ? 'N:' : 'C:') + rKey;
+        if (seenCanon[rKey]) continue;
+        seenCanon[rKey] = true;
+      }
       seenCanon[cKey] = true;
       deduped.push(row);
     }
@@ -971,6 +999,65 @@
     if (digits >= 12) return '';
     if (digits >= 8) return '；本次数值约 ' + digits.toFixed(1) + ' 位，闭式结论按该精度打折看待';
     return '；本次数值仅 ' + digits.toFixed(1) + ' 位，闭式候选可能是巧合，请优先看「独立复核」列';
+  }
+
+  function describeSettingsEffect(targetDigits, closedEnabled) {
+    var raw = Number(targetDigits);
+    var td = (raw === 12 || raw === 18 || raw === 25 || raw === 35) ? raw : 25;
+    var closed = closedEnabled !== false;
+    var buttonText = closed ? '计算并求闭式' : '计算定积分';
+    if (!closed) {
+      var speedDesc = td <= 12 ? '极快响应（通常 < 30 ms），适合快速预览。'
+                    : td <= 18 ? '速度较快，约双精度上限。'
+                    : td <= 25 ? '平衡精度与速度，结果约 25 位有效数字。'
+                    : '超深求积（可达约 35 位高精度展示），后台运行耗时明显增加，可随时停止。';
+      return {
+        targetDigits: td,
+        closedEnabled: false,
+        level: 'info',
+        buttonText: buttonText,
+        summary: '纯数值模式 · 目标 ' + td + ' 位（闭式搜索已关闭）',
+        details: '只计算定积分数值、保守误差 ±σ 与发散/振荡诊断；跳过符号反导数、确定性 PSLQ 与 RIES，不再给出闭式猜想或「推测概率」。' + speedDesc
+      };
+    }
+    if (td <= 12) {
+      return {
+        targetDigits: td,
+        closedEnabled: true,
+        level: 'warn',
+        buttonText: buttonText,
+        summary: '低精度警告 · 仅 RIES 双精度猜想（确定性 PSLQ 已禁用）',
+        details: '12 位目标低于 14.5 位门槛：确定性 BigInt PSLQ 不会启动（高系数线性组合如 (π+9·ln2)/24 极可能漏检）；52 位 Fail-Closed 强复核亦难拦截低位巧合，结果仅供参考。'
+      };
+    }
+    if (td <= 18) {
+      return {
+        targetDigits: td,
+        closedEnabled: true,
+        level: 'info',
+        buttonText: buttonText,
+        summary: '较快闭式档 · 18 位数值 + 基础 PSLQ + RIES',
+        details: '速度快且开启 PSLQ 与 RIES；但相对 25 位少 7 位冗余，接近 17.5 位 Fail-Closed 阈值边界且 PSLQ 可用定标较浅（≤14 位），复杂线性组合可能漏检，推荐常规使用 25 位。'
+      };
+    }
+    if (td <= 25) {
+      return {
+        targetDigits: td,
+        closedEnabled: true,
+        level: 'ok',
+        buttonText: buttonText,
+        summary: '推荐平衡档 · 25 位数值 + 三支柱全开（PSLQ + 52 位 Fail-Closed）',
+        details: '默认推荐：在后台 Worker 跑完与桌面一致的高精度预算（不卡顿主界面），满足 PSLQ 深定标与 ≥17.5 位 52 位独立复核硬门槛，兼顾召回率与防误导。'
+      };
+    }
+    return {
+      targetDigits: td,
+      closedEnabled: true,
+      level: 'info',
+      buttonText: buttonText,
+      summary: '超高精度档 · 35 位数值 + 深度 PSLQ（耗时显著增加）',
+      details: '开启超深求积级数与高精度工作区（结果最高展示 35 位），PSLQ 定标上限提升至 34 位以冲击高难度常数组合；手机或奇异/振荡函数可能需要数秒至十余秒，可随时点击「停止计算」。'
+    };
   }
 
   /* ---------- 符号层展示 ---------- */
@@ -1037,7 +1124,9 @@
     el.symFoot.innerHTML = '';
   }
 
-  function renderNumeric(r) {    var badge = r.verdict === 'ok' ? '可积'
+  function renderNumeric(r, closedEnabled) {
+    var closed = closedEnabled !== false;
+    var badge = r.verdict === 'ok' ? '可积'
               : r.verdict === 'divergent' ? '疑似发散'
               : r.verdict === 'oscillatory' ? '振荡·不给数'
               : '不确定';
@@ -1057,10 +1146,16 @@
       ? '已跳过闭式搜索：对发散积分给小数是误导性的。'
       : r.verdict === 'oscillatory'
       ? '已跳过闭式搜索：振荡积分尚未收敛，给数会把误差当成信号喂给 RIES。'
+      : !closed
+      ? '纯数值模式：已按开关关闭闭式搜索，未调用符号层 / PSLQ / RIES。'
       : isZeroVal
       ? '数值在当前精度内为 0（已跳过闭式搜索，不把浮点噪声送入 RIES）。'
       : '送入闭式搜索的是 ' + feedDigits +
         ' 位有效数字（RIES 内部按双精度搜索），σ 是保守误差界，两者口径不同。';
+    var metaParts = [];
+    if (isFinite(r.targetDigits)) metaParts.push('目标 ' + r.targetDigits + ' 位');
+    if (isFinite(r.elapsedMs)) metaParts.push('耗时 ' + r.elapsedMs + ' ms');
+    var extraMeta = metaParts.length ? '（' + metaParts.join('，') + '）' : '';
     el.out.innerHTML =
       '<div class="ig-grid">' +
         '<div class="ig-cell"><span>数值结果</span><strong' + (noNumber ? ' class="ig-bad"' : '') + '>' + numText + '</strong></div>' +
@@ -1068,7 +1163,7 @@
         '<div class="ig-cell"><span>保守有效位</span><strong>' + digText + ' </strong></div>' +
         '<div class="ig-cell"><span>判定</span><strong class="ig-' + cls + '">' + badge + '</strong></div>' +
       '</div>' +
-      '<p class="subtle-note">方法：' + esc(r.method || '—') + '。误差类型：' + esc(r.errorType) + '。' + feedNote +
+      '<p class="subtle-note">方法：' + esc(r.method || '—') + extraMeta + '。误差类型：' + esc(r.errorType) + '。' + feedNote +
       ' 区间映射：' + esc(r.transformLabel) +
       (r.valueText ? '；高精度层单独求值，见下方说明。' : '；函数求值 ' + r.evals + ' 次，分 ' + r.segments + ' 段。') +
       '</p>' + notes;
@@ -1137,14 +1232,18 @@
 
   function renderCandidates() {
     if (!last || riesTarget !== last || last.verdict === 'divergent' || last.verdict === 'oscillatory') return;
+    if (!lastClosedEnabled) return;
     var inputDigits = last.digits;
     var ranked = rankCandidates(pslqRows.concat(readRiesRows()), last);
     var rows = ranked.rows;
     var stopBtn = $('stopBtn');
     var riesDone = !!(stopBtn && stopBtn.disabled);
+    var toolsNode = $('resultTools');
+    var riesAbortedEarly = !!(riesDone && toolsNode && toolsNode.hidden && rows.length > 0 && !pslqRows.length);
     if (!rows.length) {
       el.cand.hidden = true;
       if (riesDone) {
+        setBusy(false);
         setStatus('闭式搜索完成：未找到可靠闭式结果，请以高精度数值结果为准。', 'warn');
       }
       return;
@@ -1153,6 +1252,7 @@
     var banner = '';
     if (!ranked.hasReliableClosed) {
       var reasonParts = [];
+      if (riesAbortedEarly) reasonParts.push('RIES 阶段超时提前结束，当前仅保留早期低精度快照');
       if (ranked.hpRejectedCount > 0) reasonParts.push('52 位高精度复核已否决 ' + ranked.hpRejectedCount + ' 项 Float64 浮点巧合');
       if (ranked.equivIntCount > 0) reasonParts.push('等价积分/级数变形不计为闭式');
       var reason = reasonParts.length
@@ -1185,8 +1285,11 @@
              '<td>' + esc(check) + '</td></tr>';
     }).join('');
     if (riesDone) {
+      setBusy(false);
       if (ranked.hasReliableClosed) {
         setStatus('闭式搜索完成：已找到通过验证的高置信度闭式候选（请优先核对「独立复核」列）。', 'ok');
+      } else if (riesAbortedEarly) {
+        setStatus('RIES 阶段超时提前结束（仅保留早期低精度快照），未找到可靠闭式结果；建议提高数值精度依赖 PSLQ，或以高精度数值结果为准。', 'warn');
       } else {
         setStatus('闭式搜索完成：未找到可靠闭式结果（等价积分变形与低置信度拟合不计为闭式），请以高精度数值结果为准。', 'warn');
       }
@@ -1205,18 +1308,21 @@
   }
 
   /* 走「高精度确定性 PSLQ + RIES」并轨路径 */
-  function runRies(r, note) {
+  function runRies(r, note, precomputedPslq) {
     if (r.verdict === 'ok' && (r.value === 0 || r.isNearZero)) {
       setStatus((note || '') + '积分数值在当前精度内为 0，无需进行闭式搜索。', 'ok');
       el.cand.hidden = true;
+      setBusy(false);
       return;
     }
     var policyNote = precisionNotice(r.digits);
     var pslqMod = PSLQ || (isBrowser ? window.IntegralPSLQ : global.IntegralPSLQ);
-    pslqRows = (pslqMod && r.valueText && r.digits >= 14.5) ? pslqMod.search(r) : [];
+    pslqRows = Array.isArray(precomputedPslq)
+      ? precomputedPslq
+      : ((pslqMod && r.valueText && r.digits >= 14.5) ? pslqMod.search(r) : []);
 
     var target = $('target'), maxRel = $('maxRelError'), runBtn = $('runBtn');
-    /* 保护原版 RIES 召回率：放宽每模块显示条数（防止真解被前 5 个浮点巧合挤出）与相对误差门限 */
+    /* 保护原版 RIES 召回率：放宽每模块显示条数（防止真解被前 5 个浮点巧合挤出）与阶段预算 */
     ['limit', 'riesLimit', 'linearComboLimit', 'mobiusLimit', 'logLimit', 'constantDbLimit', 'lfuncLimit'].forEach(function (id) {
       var node = $(id);
       if (node && parseInt(node.value, 10) < 15) {
@@ -1227,6 +1333,14 @@
         } catch (e) {}
       }
     });
+    var budgetNode = $('linearComboBudgetMs');
+    if (budgetNode && !pslqRows.length && parseInt(budgetNode.value, 10) < 6000) {
+      budgetNode.value = '6000';
+      try {
+        budgetNode.dispatchEvent(new Event('input', { bubbles: true }));
+        budgetNode.dispatchEvent(new Event('change', { bubbles: true }));
+      } catch (e) {}
+    }
 
     /* 喂给 RIES 的位数按实际有效位取，在 [6, 17] 间对齐（RIES 内部按双精度搜索） */
     var feedDigits = Math.max(6, Math.min(17, Math.floor(r.digits) + 1));
@@ -1244,7 +1358,200 @@
     riesTarget = r;
     if (pslqRows.length) renderCandidates();
     else el.cand.hidden = true;
-    try { runBtn.click(); } catch (e) { setStatus('RIES 启动失败：' + e.message, 'bad'); }
+    try {
+      runBtn.click();
+      setTimeout(function () {
+        var sb = $('stopBtn');
+        if (riesTarget === r && (!sb || sb.disabled)) {
+          renderCandidates();
+          setBusy(false);
+        }
+      }, 120);
+    } catch (e) {
+      setBusy(false);
+      setStatus('RIES 启动失败：' + e.message, 'bad');
+    }
+  }
+
+  var workerReady = false;
+
+  function terminateWorker() {
+    if (numWorker) {
+      try { numWorker.terminate(); } catch (e) {}
+      numWorker = null;
+    }
+    workerReady = false;
+  }
+
+  function setBusy(busy) {
+    if (el.stop) {
+      el.stop.hidden = !busy;
+      el.stop.disabled = !busy;
+    }
+  }
+
+  function cancelActiveComputation(userInitiated) {
+    activeJobId++;
+    if (workerPending) {
+      var pending = workerPending;
+      workerPending = null;
+      terminateWorker();
+      try { pending.resolve({ cancelled: true }); } catch (e) {}
+    }
+    clearTimeout(scheduleCandidateRender.t);
+    riesTarget = null;
+    var stopBtn = $('stopBtn');
+    if (stopBtn && !stopBtn.disabled) {
+      try { stopBtn.click(); } catch (e) {}
+    }
+    if (userInitiated) {
+      setBusy(false);
+      setStatus('已停止当前计算。已有结果保留在下方；可调整精度或修改表达式后重新计算。', 'warn');
+    }
+  }
+
+  function updateControlsUI() {
+    if (!isBrowser) return;
+    if (el.precGroup) {
+      Array.prototype.forEach.call(el.precGroup.querySelectorAll('[data-prec]'), function (btn) {
+        var v = parseInt(btn.getAttribute('data-prec'), 10);
+        var active = v === targetDigitsPref;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+    if (el.closedToggle) el.closedToggle.checked = closedEnabledPref;
+    var info = describeSettingsEffect(targetDigitsPref, closedEnabledPref);
+    if (el.run) el.run.textContent = info.buttonText;
+    if (el.guide) {
+      el.guide.className = 'ig-guide ' + info.level;
+      el.guide.innerHTML = '<strong>' + esc(info.summary) + '</strong><span>' + esc(info.details) + '</span>';
+    }
+    if (el.riesSection) el.riesSection.hidden = !closedEnabledPref;
+    if (!closedEnabledPref) {
+      if (el.cand) el.cand.hidden = true;
+      clearSymbolic();
+    }
+  }
+
+  function runNumericFallback(src, aRaw, bRaw, opt, runPslq, jobId, onProgress) {
+    return new Promise(function (resolve, reject) {
+      setTimeout(function () {
+        if (jobId !== activeJobId) { resolve({ cancelled: true }); return; }
+        if (onProgress) onProgress('integrate');
+        setTimeout(function () {
+          if (jobId !== activeJobId) { resolve({ cancelled: true }); return; }
+          var t0 = Date.now();
+          try {
+            var f = C.compile(src);
+            var r = C.integrate(f, aRaw, bRaw, opt || {});
+            var pslq = [];
+            var pslqMod = PSLQ || (isBrowser ? window.IntegralPSLQ : global.IntegralPSLQ);
+            if (runPslq && r && r.verdict === 'ok' && !r.isNearZero && r.value !== 0 &&
+                r.valueText && r.digits >= 14.5 && pslqMod && pslqMod.search) {
+              if (onProgress) onProgress('pslq');
+              pslq = pslqMod.search(r);
+            }
+            resolve({ result: r, pslqRows: pslq, elapsedMs: Date.now() - t0, fromWorker: false });
+          } catch (err) {
+            reject(err);
+          }
+        }, 0);
+      }, 16);
+    });
+  }
+
+  function runNumericAsync(src, aRaw, bRaw, opt, runPslq, jobId, onProgress) {
+    if (workerDisabled || !isBrowser || typeof window.Worker !== 'function') {
+      return runNumericFallback(src, aRaw, bRaw, opt, runPslq, jobId, onProgress);
+    }
+    if (!numWorker) {
+      try {
+        numWorker = new window.Worker('integral-worker.js?v=2.17');
+        workerReady = false;
+      } catch (e) {
+        workerDisabled = true;
+        numWorker = null;
+        return runNumericFallback(src, aRaw, bRaw, opt, runPslq, jobId, onProgress);
+      }
+      numWorker.onmessage = function (ev) {
+        var d = ev && ev.data ? ev.data : {};
+        var p = workerPending;
+        if (!p || d.id !== p.jobId) return;
+        if (d.type === 'progress') {
+          workerReady = true;
+          if (p.onProgress) p.onProgress(d.phase);
+          return;
+        }
+        workerPending = null;
+        if (d.type === 'done') {
+          workerReady = true;
+          p.resolve({
+            result: d.result,
+            pslqRows: d.pslqRows || [],
+            elapsedMs: d.elapsedMs,
+            fromWorker: true
+          });
+          return;
+        }
+        if (d.type === 'error') {
+          var msg = String(d.message || '后台计算错误');
+          if (!workerReady && /后台计算线程初始化失败/.test(msg)) {
+            workerDisabled = true;
+            terminateWorker();
+            runNumericFallback(p.src, p.aRaw, p.bRaw, p.opt, p.runPslq, p.jobId, p.onProgress)
+              .then(p.resolve, p.reject);
+            return;
+          }
+          workerReady = true;
+          p.reject(new Error(msg));
+        }
+      };
+      numWorker.onerror = function () {
+        var p = workerPending;
+        workerPending = null;
+        var wasReady = workerReady;
+        terminateWorker();
+        if (!wasReady) workerDisabled = true;
+        if (p) {
+          if (!wasReady) {
+            runNumericFallback(p.src, p.aRaw, p.bRaw, p.opt, p.runPslq, p.jobId, p.onProgress)
+              .then(p.resolve, p.reject);
+          } else {
+            p.reject(new Error('后台计算 Worker 异常中止'));
+          }
+        }
+      };
+    }
+
+    return new Promise(function (resolve, reject) {
+      workerPending = {
+        jobId: jobId,
+        src: src,
+        aRaw: aRaw,
+        bRaw: bRaw,
+        opt: opt,
+        runPslq: runPslq,
+        onProgress: onProgress,
+        resolve: resolve,
+        reject: reject
+      };
+      try {
+        numWorker.postMessage({
+          id: jobId,
+          src: src,
+          aRaw: aRaw,
+          bRaw: bRaw,
+          opt: opt || {},
+          runPslq: !!runPslq
+        });
+      } catch (e) {
+        workerPending = null;
+        workerDisabled = true;
+        terminateWorker();
+        runNumericFallback(src, aRaw, bRaw, opt, runPslq, jobId, onProgress).then(resolve, reject);
+      }
+    });
   }
 
   /* 符号层没给出结果时，把原因写在状态栏最前面 —— 静默回退会让人以为功能没做 */
@@ -1263,68 +1570,104 @@
   function solve() {
     var src = el.f.value.trim();
     if (!src) { setStatus('请先输入 f(x)。', 'bad'); return; }
-    riesTarget = null;
+    try { C.compile(src); } catch (e) { setStatus('表达式错误：' + e.message, 'bad'); return; }
+
+    cancelActiveComputation(false);
+    var jobId = activeJobId;
+    var td = targetDigitsPref;
+    var closed = closedEnabledPref;
+    var aRaw = el.a.value, bRaw = el.b.value;
+
+    lastClosedEnabled = closed;
     pslqRows = [];
     clearTimeout(scheduleCandidateRender.t);
     el.cand.hidden = true;
     el.candBody.innerHTML = '';
-    var stopBtn = $('stopBtn');
-    if (stopBtn && !stopBtn.disabled) {
-      try { stopBtn.click(); } catch (e) {}
-    }
     clearSymbolic();
-    var f, r;
-    try { f = C.compile(src); } catch (e) { setStatus('表达式错误：' + e.message, 'bad'); return; }
-    try { r = C.integrate(f, el.a.value, el.b.value); }
-    catch (e) { setStatus('积分失败：' + e.message, 'bad'); return; }
-    r.profile = analyzeIntegralProfile(src, el.a.value, el.b.value, r.slopes);
-    last = r;
-    renderNumeric(r);
+    setBusy(true);
+    setStatus('正在后台计算高精度数值积分（目标 ' + td + ' 位）…', 'searching');
 
-    if (r.verdict === 'divergent') {
-      setStatus('判定为发散：已拒绝把数值送入闭式搜索（标准 MC 会给出看似正常的假答案）。', 'bad');
-      el.cand.hidden = true;
-      return;
-    }
-    if (r.verdict === 'oscillatory') {
-      setStatus('判定为振荡型积分且加速未收敛：本方法不适用，已拒绝给数，避免把误差当成信号。', 'bad');
-      el.cand.hidden = true;
-      return;
-    }
-
-    /* 符号优先：符号引擎跑在 Worker 里，卡住就超时杀掉，主线程不会冻结。
-       拿到反导数后由主线程做双重验证；通过且能化成常数形式就直接给答案，不必让 RIES 去猜。 */
-    var aRaw = el.a.value, bRaw = el.b.value;
-    if (!window.IntegralSymbolic) {
-      runRies(r, '符号层未加载（integral-symbolic.js 缺失或版本过旧）；');
-      return;
-    }
-
-    setStatus('数值已算出，正在尝试符号解…', 'searching');
-    window.IntegralSymbolic.solveAsync(src, aRaw, bRaw, r.value, 2500).then(function (res) {
-      if (last !== r) return;                     /* 期间用户又点了计算，放弃这次结果 */
-      if (res && res.status === 'ok' && res.sym) {
-        renderSymbolic(res.sym, aRaw, bRaw);
-        if (res.sym.exact && !res.sym.exactIsNumeric) {
-          var pretty = res.sym.exact.replace(/\blog\(/g, 'ln(');
-          setStatus('符号解已求得并通过双重验证：定积分 = ' + pretty +
-            '。已跳过闭式搜索（不需要猜）。', 'ok');
-          el.cand.hidden = true;
-          return;
-        }
+    runNumericAsync(src, aRaw, bRaw, { targetDigits: td }, closed, jobId, function (phase) {
+      if (jobId !== activeJobId) return;
+      if (phase === 'pslq') {
+        setStatus('数值已完成，正在后台运行确定性 PSLQ 搜索…', 'searching');
       }
-      var symNote = (res && res.status === 'ok' && res.sym && res.sym.exactIsNumeric)
-        ? '符号层仅求出反导数（代入界限未得精确闭式）；'
-        : symbolicNote(res);
-      runRies(r, symNote);
+    }).then(function (payload) {
+      if (!payload || payload.cancelled || jobId !== activeJobId) return;
+      var r = payload.result;
+      var workerPslq = payload.pslqRows || [];
+      r.profile = analyzeIntegralProfile(src, aRaw, bRaw, r.slopes);
+      r.targetDigits = td;
+      r.elapsedMs = payload.elapsedMs;
+      last = r;
+      renderNumeric(r, closed);
+
+      if (r.verdict === 'divergent') {
+        setBusy(false);
+        setStatus('判定为发散：已拒绝把数值送入闭式搜索（标准 MC 会给出看似正常的假答案）。', 'bad');
+        el.cand.hidden = true;
+        return;
+      }
+      if (r.verdict === 'oscillatory') {
+        setBusy(false);
+        setStatus('判定为振荡型积分且加速未收敛：本方法不适用，已拒绝给数，避免把误差当成信号。', 'bad');
+        el.cand.hidden = true;
+        return;
+      }
+      if (!closed) {
+        setBusy(false);
+        el.cand.hidden = true;
+        setStatus('数值计算完成（纯数值模式，目标 ' + td + ' 位，耗时 ' + r.elapsedMs + ' ms；已按开关关闭闭式搜索）。', 'ok');
+        return;
+      }
+      if (r.value === 0 || r.isNearZero) {
+        setBusy(false);
+        el.cand.hidden = true;
+        setStatus('积分数值在当前精度内为 0，已跳过闭式搜索。', 'ok');
+        return;
+      }
+
+      /* 符号优先：符号引擎跑在 Worker 里，卡住就超时杀掉，主线程不会冻结。
+         拿到反导数后由主线程做双重验证；通过且能化成常数形式就直接给答案，不必让 RIES 去猜。 */
+      if (!window.IntegralSymbolic) {
+        runRies(r, '符号层未加载（integral-symbolic.js 缺失或版本过旧）；', workerPslq);
+        return;
+      }
+
+      setStatus('数值已算出（' + td + ' 位档，耗时 ' + r.elapsedMs + ' ms），正在尝试符号解…', 'searching');
+      window.IntegralSymbolic.solveAsync(src, aRaw, bRaw, r.value, 2500).then(function (res) {
+        if (jobId !== activeJobId || last !== r) return;
+        if (res && res.status === 'ok' && res.sym) {
+          renderSymbolic(res.sym, aRaw, bRaw);
+          if (res.sym.exact && !res.sym.exactIsNumeric) {
+            var pretty = res.sym.exact.replace(/\blog\(/g, 'ln(');
+            setBusy(false);
+            setStatus('符号解已求得并通过双重验证：定积分 = ' + pretty +
+              '。已跳过闭式搜索（不需要猜）。', 'ok');
+            el.cand.hidden = true;
+            return;
+          }
+        }
+        var symNote = (res && res.status === 'ok' && res.sym && res.sym.exactIsNumeric)
+          ? '符号层仅求出反导数（代入界限未得精确闭式）；'
+          : symbolicNote(res);
+        runRies(r, symNote, workerPslq);
+      }).catch(function (e) {
+        if (jobId === activeJobId && last === r) {
+          runRies(r, '符号层异常（' + (e && e.message || e) + '）；', workerPslq);
+        }
+      });
     }).catch(function (e) {
-      if (last === r) runRies(r, '符号层异常（' + (e && e.message || e) + '）；');
+      if (jobId !== activeJobId) return;
+      setBusy(false);
+      setStatus('积分失败：' + (e && e.message || e), 'bad');
     });
   }
 
   function loadExample(f, a, b) {
     el.f.value = f; el.a.value = a; el.b.value = b;
-    setStatus('已载入例题，点「计算并求闭式」运行。');
+    var btnText = describeSettingsEffect(targetDigitsPref, closedEnabledPref).buttonText;
+    setStatus('已载入例题，点「' + btnText + '」运行。');
   }
 
   var helpers = {
@@ -1336,20 +1679,46 @@
     structDelta: structDelta,
     modelComplexityDigits: modelComplexityDigits,
     guessProbability: guessProbability,
-    rankCandidates: rankCandidates
+    rankCandidates: rankCandidates,
+    describeSettingsEffect: describeSettingsEffect,
+    riesEqDedupKey: riesEqDedupKey
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = helpers;
   if (isBrowser) {
     window.IntegralGlueHelpers = helpers;
     el.run.addEventListener('click', solve);
     el.f.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
-    el.exPlus.addEventListener('click', function () {
+    if (el.a) el.a.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
+    if (el.b) el.b.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
+    if (el.precGroup) {
+      el.precGroup.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('[data-prec]') : null;
+        if (!btn) return;
+        var v = parseInt(btn.getAttribute('data-prec'), 10);
+        if (v === 12 || v === 18 || v === 25 || v === 35) {
+          targetDigitsPref = v;
+          updateControlsUI();
+        }
+      });
+    }
+    if (el.closedToggle) {
+      el.closedToggle.addEventListener('change', function () {
+        closedEnabledPref = !!el.closedToggle.checked;
+        updateControlsUI();
+      });
+    }
+    if (el.stop) {
+      el.stop.addEventListener('click', function () {
+        cancelActiveComputation(true);
+      });
+    }
+    if (el.exPlus) el.exPlus.addEventListener('click', function () {
       loadExample('abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))', '0', 'inf');
     });
-    el.exMinus.addEventListener('click', function () {
+    if (el.exMinus) el.exMinus.addEventListener('click', function () {
       loadExample('abs(sin(x))/(exp(x)-abs(sin(x)+cos(x)))', '0', 'inf');
     });
-    el.exSimple.addEventListener('click', function () {
+    if (el.exSimple) el.exSimple.addEventListener('click', function () {
       loadExample('exp(-x^2)', '-inf', 'inf');
     });
 
@@ -1363,6 +1732,8 @@
       var stopObs = new MutationObserver(scheduleCandidateRender);
       stopObs.observe(stopBtnEl, { attributes: true, attributeFilter: ['disabled'] });
     }
-    setStatus('就绪（积分层 v2.16）。支持 + - * / ^、abs/sin/cos/exp/log/sqrt/atanh/arctanh 等；变量只能写 x。');
+    updateControlsUI();
+    setBusy(false);
+    setStatus('就绪（积分层 v2.17 · 后台 Worker + 可选精度/闭式开关）。支持 + - * / ^、abs/sin/cos/exp/log/sqrt/atanh/arctanh 等；变量只能写 x。');
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);
