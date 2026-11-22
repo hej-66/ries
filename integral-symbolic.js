@@ -60,6 +60,9 @@
 
   function normalizeForEngine(expr) {
     var s = String(expr).trim();
+    if (C && C.normalizeExpr) {
+      try { s = C.normalizeExpr(s); } catch (e) {}
+    }
     var ts = [], i = 0;
     while (i < s.length) {
       var c = s[i];
@@ -75,6 +78,10 @@
         var id = m2[0];
         var low = id.toLowerCase();
         if (low === 'ln') id = 'log';
+        else if (low === 'ln2') { id = '(log(2))'; low = ''; }
+        else if (low === 'ln10') { id = '(log(10))'; low = ''; }
+        else if (low === 'tau') { id = '(2*pi)'; low = ''; }
+        else if (low === 'phi') { id = '((1+sqrt(5))/2)'; low = ''; }
         else if (low === 'pi') id = 'pi';
         else if (low === 'arcsin') { id = 'asin'; low = 'asin'; }
         else if (low === 'arccos') { id = 'acos'; low = 'acos'; }
@@ -114,6 +121,13 @@
 
   function toEngine(expr) {
     return expandPow(normalizeForEngine(expr));
+  }
+
+  function boundToEngine(raw) {
+    var s = String(raw).trim().toLowerCase().replace(/\s/g, '');
+    if (s === 'inf' || s === '+inf' || s === 'infinity' || s === '∞' || s === '+∞') return 'Infinity';
+    if (s === '-inf' || s === '-infinity' || s === '-∞') return '-Infinity';
+    return toEngine(raw);
   }
 
   function samplePoints(a, b, n) {
@@ -356,7 +370,9 @@
     return new Promise(function (resolve) {
       var src = String(fText).trim();
       if (!C) { resolve({ status: 'unavailable', why: 'IntegralCore 未加载' }); return; }
-      if (!src || src.length > 200 || UNSUPPORTED.test(src)) { resolve({ status: 'skipped' }); return; }
+      var cSrc = src;
+      if (C.normalizeExpr) { try { cSrc = C.normalizeExpr(src); } catch (e) {} }
+      if (!src || src.length > 200 || UNSUPPORTED.test(cSrc)) { resolve({ status: 'skipped' }); return; }
 
       var w = ensureWorker();
       if (!w) {
@@ -387,7 +403,7 @@
         resolve(out ? { status: 'ok', sym: out } : { status: 'rejected' });
       };
 
-      try { w.postMessage({ id: id, f: toEngine(src), a: String(aRaw), b: String(bRaw) }); }
+      try { w.postMessage({ id: id, f: toEngine(src), a: boundToEngine(aRaw), b: boundToEngine(bRaw) }); }
       catch (e) {
         settled = true;
         clearTimeout(timer);
@@ -403,8 +419,10 @@
     var n = global.nerdamer;
     if (!n || !C) return null;
     var src = String(fText).trim();
+    var cSrc = src;
+    if (C.normalizeExpr) { try { cSrc = C.normalizeExpr(src); } catch (e) {} }
     if (!src || src.length > 200) return null;
-    if (UNSUPPORTED.test(src)) return null;
+    if (UNSUPPORTED.test(cSrc)) return null;
     var Fs, Ds;
     var eSrc = toEngine(src);
     try { Fs = n('integrate(' + eSrc + ',x)').toString(); } catch (e) { return null; }
@@ -413,10 +431,7 @@
     if (!Ds || /diff\s*\(/i.test(Ds)) return null;
 
     function boundText(raw) {
-      var s = String(raw).trim().toLowerCase().replace(/\s/g, '');
-      if (s === 'inf' || s === '+inf' || s === 'infinity' || s === '∞' || s === '+∞') return 'Infinity';
-      if (s === '-inf' || s === '-infinity' || s === '-∞') return '-Infinity';
-      return toEngine(raw);
+      return boundToEngine(raw);
     }
     function evalAt(F, bt) {
       if (bt === 'Infinity' || bt === '-Infinity') return n('limit(' + F + ',x,' + bt + ')').toString();
@@ -460,6 +475,8 @@
   global.IntegralSymbolic = {
     solveAsync: solveAsync,
     solve: solveSync,
-    available: function () { return !!global.__NERDAMER_SRC__ && !!global.Worker; }
+    available: function () { return !!global.__NERDAMER_SRC__ && !!global.Worker; },
+    _normalizeForEngine: normalizeForEngine,
+    _boundToEngine: boundToEngine
   };
 })(typeof window !== 'undefined' ? window : globalThis);

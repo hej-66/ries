@@ -1,7 +1,7 @@
 /* integral-glue.js — 把「定积分数值层」「符号层」「确定性高精度 PSLQ 引擎」「原版 RIES 12.0.2」接入三支柱理论框架。
  * 不修改 ries-script.js 任何一行；只通过 DOM 交互与结果观察接入。
  *
- * v2.17 架构升级：
+ * v2.18 架构升级：
  *  1. 数值积分 + 确定性 PSLQ 迁入独立后台 Web Worker（integral-worker.js），彻底解除主线程阻塞并支持随时停止，
  *     使手机与低配电脑可无损跑完与桌面端完全一致的计算预算；Worker 受限时自动优雅降级回主线程。
  *  2. 暴露用户可调数值精度（12 / 18 / 25 / 35 位）与「闭式搜索」总开关（纯数值模式 / 闭式模式），
@@ -21,10 +21,11 @@
   var $ = function (id) { return isBrowser ? document.getElementById(id) : null; };
   var el = isBrowser ? {
     f: $('igF'), a: $('igA'), b: $('igB'), run: $('igRun'), stop: $('igStop'),
+    parsePreview: $('igParsePreview'),
     precGroup: $('igPrecGroup'), closedToggle: $('igClosedToggle'), guide: $('igGuide'),
     status: $('igStatus'), result: $('igResult'), out: $('igOut'),
     cand: $('igCandidates'), candBody: $('igCandBody'),
-    exPlus: $('igExPlus'), exMinus: $('igExMinus'), exSimple: $('igExSimple'),
+    exPlus: $('igExPlus'), exMinus: $('igExMinus'), exSimple: $('igExSimple'), exLogOsc: $('igExLogOsc'),
     sym: $('igSymbolic'), symEq: $('igSymEq'), symValue: $('igSymValue'), symFoot: $('igSymFoot'),
     riesSection: $('riesSection')
   } : {};
@@ -673,6 +674,9 @@
 
   function analyzeIntegralProfile(src, aRaw, bRaw, slopes) {
     var s = String(src || '');
+    if (C && C.normalizeExpr) {
+      try { s = C.normalizeExpr(s); } catch (e) {}
+    }
     var aClean = String(aRaw == null ? '' : aRaw), bClean = String(bRaw == null ? '' : bRaw);
     var boundsCanonical = isCanonicalBound(aClean) && isCanonicalBound(bClean);
     var floats = s.match(/\d+\.\d+/g) || [];
@@ -1467,7 +1471,7 @@
     }
     if (!numWorker) {
       try {
-        numWorker = new window.Worker('integral-worker.js?v=2.17');
+        numWorker = new window.Worker('integral-worker.js?v=2.19');
         workerReady = false;
       } catch (e) {
         workerDisabled = true;
@@ -1567,9 +1571,37 @@
     }
   }
 
+  function updateParsePreview() {
+    if (!el.parsePreview || !el.f) return;
+    var raw = el.f.value.trim();
+    if (!raw) {
+      el.parsePreview.hidden = true;
+      el.parsePreview.textContent = '';
+      return;
+    }
+    try {
+      var norm = C.normalizeExpr ? C.normalizeExpr(raw) : C.compile(raw).src;
+      var compactRaw = raw.replace(/\s+/g, '');
+      var compactNorm = String(norm || '').replace(/\s+/g, '');
+      if (!compactNorm || compactRaw === compactNorm) {
+        el.parsePreview.hidden = true;
+        el.parsePreview.textContent = '';
+        return;
+      }
+      el.parsePreview.className = 'ig-parse-preview ok';
+      el.parsePreview.innerHTML = '<span>简写解析</span><code>' + esc(norm) + '</code>';
+      el.parsePreview.hidden = false;
+    } catch (e) {
+      el.parsePreview.className = 'ig-parse-preview err';
+      el.parsePreview.innerHTML = '<span>语法提示</span><span>' + esc(e && e.message || e) + '</span>';
+      el.parsePreview.hidden = false;
+    }
+  }
+
   function solve() {
     var src = el.f.value.trim();
     if (!src) { setStatus('请先输入 f(x)。', 'bad'); return; }
+    updateParsePreview();
     try { C.compile(src); } catch (e) { setStatus('表达式错误：' + e.message, 'bad'); return; }
 
     cancelActiveComputation(false);
@@ -1666,6 +1698,7 @@
 
   function loadExample(f, a, b) {
     el.f.value = f; el.a.value = a; el.b.value = b;
+    updateParsePreview();
     var btnText = describeSettingsEffect(targetDigitsPref, closedEnabledPref).buttonText;
     setStatus('已载入例题，点「' + btnText + '」运行。');
   }
@@ -1688,6 +1721,7 @@
     window.IntegralGlueHelpers = helpers;
     el.run.addEventListener('click', solve);
     el.f.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
+    el.f.addEventListener('input', updateParsePreview);
     if (el.a) el.a.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
     if (el.b) el.b.addEventListener('keydown', function (e) { if (e.key === 'Enter') solve(); });
     if (el.precGroup) {
@@ -1713,13 +1747,16 @@
       });
     }
     if (el.exPlus) el.exPlus.addEventListener('click', function () {
-      loadExample('abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))', '0', 'inf');
+      loadExample('abs(sinx)/(e^x+abs(sinx+cosx))', '0', 'inf');
     });
     if (el.exMinus) el.exMinus.addEventListener('click', function () {
-      loadExample('abs(sin(x))/(exp(x)-abs(sin(x)+cos(x)))', '0', 'inf');
+      loadExample('abs(sinx)/(e^x-abs(sinx+cosx))', '0', 'inf');
     });
     if (el.exSimple) el.exSimple.addEventListener('click', function () {
-      loadExample('exp(-x^2)', '-inf', 'inf');
+      loadExample('exp-x^2', '-inf', 'inf');
+    });
+    if (el.exLogOsc) el.exLogOsc.addEventListener('click', function () {
+      loadExample('ln(((1+sinx)/(1-sinx))^2)/x', '0', 'inf');
     });
 
     var body = $('resultBody');
@@ -1733,7 +1770,8 @@
       stopObs.observe(stopBtnEl, { attributes: true, attributeFilter: ['disabled'] });
     }
     updateControlsUI();
+    updateParsePreview();
     setBusy(false);
-    setStatus('就绪（积分层 v2.17 · 后台 Worker + 可选精度/闭式开关）。支持 + - * / ^、abs/sin/cos/exp/log/sqrt/atanh/arctanh 等；变量只能写 x。');
+    setStatus('就绪（积分层 v2.19 · 免括号简写解析 + 后台 Worker + 可选精度/闭式开关）。支持 sinx / sinsinx / sin2^x / exp-x^2 等简写；变量只能写 x。');
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);

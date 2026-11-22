@@ -45,64 +45,125 @@
     infinity: function () { return new D(Infinity); }
   };
 
+  var INNER_CONSTS = { pi: 1, e: 1, tau: 1, phi: 1 };
+  var BIN_FUNCS = { atan2: 1, hypot: 1, pow: 1, min: 1, max: 1 };
+
+  function funcArity(name) {
+    if (!Object.prototype.hasOwnProperty.call(DFUNCS, name)) return 0;
+    return Object.prototype.hasOwnProperty.call(BIN_FUNCS, name) ? 2 : 1;
+  }
+
+  /* 拆分连写标识符：与 integral-core.js 保持完全一致（支持 sinx / sinsinx / sin2^x 等） */
+  function splitGluedIdent(word, firstWs) {
+    var low = String(word).toLowerCase();
+    if (low === 'x' || Object.prototype.hasOwnProperty.call(DCONSTS, low) || Object.prototype.hasOwnProperty.call(DFUNCS, low)) {
+      return [{ t: 'id', v: low, ws: !!firstWs }];
+    }
+    var n = low.length;
+    var memo = Object.create(null);
+    function solve(i, canNum) {
+      if (i === n) return { toks: [], cost: 0 };
+      var key = i + ':' + (canNum ? 1 : 0);
+      if (key in memo) return memo[key];
+      var best = null;
+      function accept(cand) {
+        if (!best || cand.cost < best.cost) { best = cand; return; }
+        if (cand.cost === best.cost && cand.toks[0].v.length > best.toks[0].v.length) best = cand;
+      }
+      if (canNum && low[i] >= '0' && low[i] <= '9') {
+        var j = i;
+        while (j < n && low[j] >= '0' && low[j] <= '9') j++;
+        var numRaw = low.slice(i, j);
+        var restN = solve(j, false);
+        if (restN) {
+          accept({ toks: [{ t: 'num', v: numRaw, ws: false }].concat(restN.toks), cost: 1 + restN.cost });
+        }
+      }
+      for (var k = n; k > i; k--) {
+        var sub = low.slice(i, k);
+        var arity = funcArity(sub);
+        var isUnary = (arity === 1);
+        var isAtom = (sub === 'x' || Object.prototype.hasOwnProperty.call(INNER_CONSTS, sub));
+        if (!isUnary && !isAtom) continue;
+        var rest = solve(k, isUnary);
+        if (rest) {
+          var pc = isUnary ? 1 : (sub === 'x' ? 1 : 1.05);
+          accept({ toks: [{ t: 'id', v: sub, ws: false }].concat(rest.toks), cost: pc + rest.cost });
+        }
+      }
+      memo[key] = best;
+      return best;
+    }
+    var res = solve(0, false);
+    if (!res) {
+      if (/^(?:x|pi|e|tau|phi)\d+$/i.test(low)) {
+        throw new Error('变量或常数「' + word + '」后面不能直接紧跟数字（请用 ^ 或 *，例如 x^2、2*x）');
+      }
+      throw new Error('未知标识符「' + word + '」（变量只能用 x）');
+    }
+    res.toks[0].ws = !!firstWs;
+    return res.toks;
+  }
+
   /* ---------- 词法 ---------- */
   function tokenize(src) {
     var out = [], i = 0, s = String(src);
-    var isDigit = function (c) { return c >= '0' && c <= '9'; };
-    var isAlpha = function (c) { return /[a-zA-Z_]/.test(c); };
     while (i < s.length) {
+      var hadWs = false;
+      while (i < s.length && /\s/.test(s[i])) { hadWs = true; i++; }
+      if (i >= s.length) break;
       var c = s[i];
-      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
-      if (isDigit(c) || (c === '.' && isDigit(s[i + 1]))) {
-        var j = i;
-        while (j < s.length && (isDigit(s[j]) || s[j] === '.')) j++;
-        if (s[j] === 'e' || s[j] === 'E') {
-          var k = j + 1;
-          if (s[k] === '+' || s[k] === '-') k++;
-          if (isDigit(s[k])) { while (k < s.length && isDigit(s[k])) k++; j = k; }
+      if (/[0-9.]/.test(c)) {
+        var m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s.slice(i));
+        if (!m) throw new Error('无法解析的数字：' + s.slice(i, i + 12));
+        out.push({ t: 'num', v: m[0], ws: hadWs });
+        i += m[0].length;
+        continue;
+      }
+      if (c === 'π') { out.push({ t: 'id', v: 'pi', ws: hadWs }); i++; continue; }
+      if (c === '∞') { out.push({ t: 'id', v: 'inf', ws: hadWs }); i++; continue; }
+      if (/[a-zA-Z_]/.test(c)) {
+        var m2 = /^[a-zA-Z_][a-zA-Z0-9_]*/.exec(s.slice(i));
+        var word = m2[0], wLow = word.toLowerCase();
+        if (!(wLow === 'x' || Object.prototype.hasOwnProperty.call(DCONSTS, wLow) || Object.prototype.hasOwnProperty.call(DFUNCS, wLow))) {
+          var after = s.slice(i + word.length);
+          var mDec = /^(.*?)(\d+)$/.exec(word);
+          if (mDec && after.length >= 2 && after[0] === '.' && /[0-9]/.test(after[1])) {
+            word = mDec[1];
+          } else {
+            var mSci = /^(.*?)(\d+[eE])$/.exec(word);
+            if (mSci && /^[+-]?\d/.test(after)) {
+              word = mSci[1];
+            } else {
+              var mSciFull = /^([a-zA-Z_]+?)(\d+[eE]\d+.*)$/.exec(word);
+              if (mSciFull && !/^\d/.test(mSciFull[1])) {
+                word = mSciFull[1];
+              }
+            }
+          }
         }
-        out.push({ t: 'num', v: s.slice(i, j) });
-        i = j;
+        var pieces = splitGluedIdent(word, hadWs);
+        for (var pi = 0; pi < pieces.length; pi++) out.push(pieces[pi]);
+        i += word.length;
         continue;
       }
-      if (isAlpha(c)) {
-        var k2 = i;
-        while (k2 < s.length && (isAlpha(s[k2]) || isDigit(s[k2]))) k2++;
-        out.push({ t: 'id', v: s.slice(i, k2) });
-        i = k2;
-        continue;
-      }
-      if (c === '*' && s[i + 1] === '*') { out.push({ t: 'op', v: '^' }); i += 2; continue; }
-      if ('+-*/^'.indexOf(c) >= 0) { out.push({ t: 'op', v: c }); i++; continue; }
-      if (c === '−') { out.push({ t: 'op', v: '-' }); i++; continue; }
-      if (c === '·' || c === '×') { out.push({ t: 'op', v: '*' }); i++; continue; }
-      if (c === '²') { out.push({ t: 'op', v: '^' }, { t: 'num', v: '2' }); i++; continue; }
-      if (c === '³') { out.push({ t: 'op', v: '^' }, { t: 'num', v: '3' }); i++; continue; }
-      if (c === '(') { out.push({ t: 'lp' }); i++; continue; }
-      if (c === ')') { out.push({ t: 'rp' }); i++; continue; }
-      if (c === ',') { out.push({ t: 'comma' }); i++; continue; }
-      if (c === 'π') { out.push({ t: 'id', v: 'pi' }); i++; continue; }
-      if (c === '∞') { out.push({ t: 'id', v: 'inf' }); i++; continue; }
+      if (c === '*' && s[i + 1] === '*') { out.push({ t: 'op', v: '^', ws: hadWs }); i += 2; continue; }
+      if ('+-*/^'.indexOf(c) >= 0) { out.push({ t: 'op', v: c, ws: hadWs }); i++; continue; }
+      if (c === '−') { out.push({ t: 'op', v: '-', ws: hadWs }); i++; continue; }
+      if (c === '·' || c === '×') { out.push({ t: 'op', v: '*', ws: hadWs }); i++; continue; }
+      if (c === '²') { out.push({ t: 'op', v: '^', ws: false }, { t: 'num', v: '2', ws: false }); i++; continue; }
+      if (c === '³') { out.push({ t: 'op', v: '^', ws: false }, { t: 'num', v: '3', ws: false }); i++; continue; }
+      if (c === '(') { out.push({ t: 'lp', ws: hadWs }); i++; continue; }
+      if (c === ')') { out.push({ t: 'rp', ws: hadWs }); i++; continue; }
+      if (c === ',') { out.push({ t: 'comma', ws: hadWs }); i++; continue; }
       throw new Error('无法识别的字符「' + c + '」');
     }
     return out;
   }
 
-  /* 隐式乘法：两个操作数相邻时补 '*'；函数名 + '(' 是调用，不补 */
-  function insertImplicit(ts) {
-    var out = [];
-    for (var i = 0; i < ts.length; i++) {
-      var cur = ts[i];
-      if (i > 0) {
-        var prev = ts[i - 1];
-        var prevEnds = prev.t === 'num' || prev.t === 'id' || prev.t === 'rp';
-        var curStarts = cur.t === 'num' || cur.t === 'id' || cur.t === 'lp';
-        var isCall = prev.t === 'id' && cur.t === 'lp' && !!DFUNCS[prev.v.toLowerCase()];
-        if (prevEnds && curStarts && !isCall) out.push({ t: 'op', v: '*' });
-      }
-      out.push(cur);
-    }
-    return out;
+  function describeToken(k) {
+    if (!k) return '表达式结尾';
+    return k.v !== undefined ? k.v : k.t;
   }
 
   function safePow(a, b) {
@@ -188,62 +249,132 @@
     max: function (a, b) { return a.gt(b) ? a : b; }
   };
 
-  /* ---------- 语法 → 闭包 ---------- */
-  function compileDec(src) {
-    var ts = insertImplicit(tokenize(src)), pos = 0;
+  /* ---------- 统一 AST 解析 + Decimal / Split-Decimal 编译 ---------- */
+  function parseHpAst(src) {
+    var ts = tokenize(src), pos = 0;
     function peek() { return ts[pos]; }
-    function eat(t) { var k = ts[pos]; if (!k || k.t !== t) throw new Error('表达式语法错误'); pos++; return k; }
+    function eat(t) {
+      var k = ts[pos];
+      if (!k || k.t !== t) throw new Error('表达式语法错误：位置 ' + pos + ' 附近是「' + describeToken(k) + '」');
+      pos++; return k;
+    }
+    function isUnaryFnTok(k) { return !!(k && k.t === 'id' && funcArity(k.v) === 1); }
+    function isBinaryFnTok(k) { return !!(k && k.t === 'id' && funcArity(k.v) === 2); }
+    function isInnerAtomTok(k) { return !!(k && k.t === 'id' && (k.v === 'x' || Object.prototype.hasOwnProperty.call(INNER_CONSTS, k.v))); }
+    function canStartImplicitFactor(k) { return !!(k && (k.t === 'num' || k.t === 'id' || k.t === 'lp')); }
 
-    function atom() {
+    function bareArg(fnName) {
       var k = peek();
-      if (!k) throw new Error('表达式意外结束');
-      if (k.t === 'num') { pos++; var lit = k.v; return function () { return new D(lit); }; }
-      if (k.t === 'id') {
+      if (!k) throw new Error('函数 ' + fnName + ' 缺少自变量（可写为 ' + fnName + '(x) 或 ' + fnName + 'x）');
+      if (k.t === 'op' && (k.v === '+' || k.v === '-')) {
         pos++;
-        var name = k.v.toLowerCase();
-        if (name === 'x') return function (x) { return x; };
-        if (Object.prototype.hasOwnProperty.call(DCONSTS, name)) {
-          var cfn = DCONSTS[name];
-          return function () { return cfn(); };
-        }
+        var inner = bareArg(fnName);
+        return k.v === '-' ? { k: 'un', a: inner } : inner;
+      }
+      if (isUnaryFnTok(k)) {
+        pos++;
         if (peek() && peek().t === 'lp') {
           pos++;
           var args = [];
-          if (!(peek() && peek().t === 'rp')) {
+          if (!peek() || peek().t !== 'rp') {
             args.push(expr());
             while (peek() && peek().t === 'comma') { pos++; args.push(expr()); }
           }
           eat('rp');
-          var fn = DFUNCS[name];
-          if (!fn) throw new Error('未知函数「' + name + '」');
-          var A = args.slice();
-          return function (x) {
-            var vs = A.map(function (f) { return f(x); });
-            return fn.apply(null, vs);
-          };
+          if (args.length !== 1) throw new Error(k.v + ' 需要 1 个参数');
+          var callNode = { k: 'fn', name: k.v, args: args };
+          if (peek() && peek().t === 'op' && peek().v === '^') {
+            pos++;
+            callNode = { k: 'bin', op: '^', l: callNode, r: unary() };
+          }
+          return callNode;
         }
-        throw new Error('未知标识符「' + name + '」');
+        return { k: 'fn', name: k.v, args: [bareArg(k.v)] };
       }
       if (k.t === 'lp') {
         pos++;
-        var inner = expr();
+        var sub = expr();
         eat('rp');
-        return inner;
+        if (peek() && peek().t === 'op' && peek().v === '^') {
+          pos++;
+          sub = { k: 'bin', op: '^', l: sub, r: unary() };
+        }
+        return sub;
       }
+      function bareAtomPow() {
+        var t = peek();
+        var node;
+        if (t && t.t === 'num') {
+          pos++;
+          node = { k: 'num', v: t.v };
+        } else if (t && t.t === 'id' && t.v === 'x') {
+          pos++;
+          node = { k: 'var' };
+        } else if (t && t.t === 'id' && Object.prototype.hasOwnProperty.call(DCONSTS, t.v)) {
+          pos++;
+          node = { k: 'const', name: t.v };
+        } else {
+          throw new Error('函数 ' + fnName + ' 缺少有效的整体自变量（复杂表达式请加括号如 ' + fnName + '(x+1)）');
+        }
+        if (peek() && peek().t === 'op' && peek().v === '^') {
+          pos++;
+          node = { k: 'bin', op: '^', l: node, r: unary() };
+        }
+        return node;
+      }
+      var first = bareAtomPow();
+      var hadPow = (first.k === 'bin' && first.op === '^');
+      var endedWithVar = (first.k === 'var');
+      if (!hadPow && !endedWithVar) {
+        while (peek() && !peek().ws && isInnerAtomTok(peek())) {
+          var rhs = bareAtomPow();
+          first = { k: 'bin', op: '*', l: first, r: rhs };
+          if (rhs.k === 'var' || (rhs.k === 'bin' && rhs.op === '^')) break;
+        }
+      }
+      return first;
+    }
+
+    function primary() {
+      var k = peek();
+      if (!k) throw new Error('表达式意外结束');
+      if (k.t === 'num') { pos++; return { k: 'num', v: k.v }; }
+      if (k.t === 'lp') { pos++; var inner = expr(); eat('rp'); return inner; }
       if (k.t === 'op' && (k.v === '-' || k.v === '+')) {
         pos++;
         var u = unary();
-        return k.v === '-' ? function (x) { return u(x).neg(); } : u;
+        return k.v === '-' ? { k: 'un', a: u } : u;
       }
-      throw new Error('表达式语法错误：位置 ' + pos + ' 附近是「' + k.v + '」');
+      if (k.t === 'id') {
+        pos++;
+        var name = k.v;
+        if (peek() && peek().t === 'lp') {
+          pos++;
+          var args = [];
+          if (!peek() || peek().t !== 'rp') {
+            args.push(expr());
+            while (peek() && peek().t === 'comma') { pos++; args.push(expr()); }
+          }
+          eat('rp');
+          var arity = funcArity(name);
+          if (!arity) throw new Error('未知函数「' + name + '」');
+          if (args.length !== arity) throw new Error(name + ' 需要 ' + arity + ' 个参数');
+          return { k: 'fn', name: name, args: args };
+        }
+        if (isBinaryFnTok(k)) throw new Error('二元函数 ' + name + ' 必须带括号和 2 个参数，例如 ' + name + '(x, 0)');
+        if (isUnaryFnTok(k)) return { k: 'fn', name: name, args: [bareArg(name)] };
+        if (name === 'x') return { k: 'var' };
+        if (Object.prototype.hasOwnProperty.call(DCONSTS, name)) return { k: 'const', name: name };
+        throw new Error('未知标识符「' + name + '」');
+      }
+      throw new Error('表达式语法错误：位置 ' + pos + ' 附近是「' + describeToken(k) + '」');
     }
 
     function power() {
-      var base = atom();
+      var base = primary();
       if (peek() && peek().t === 'op' && peek().v === '^') {
         pos++;
-        var ex = unary();
-        return function (x) { return safePow(base(x), ex(x)); };
+        return { k: 'bin', op: '^', l: base, r: unary() };
       }
       return base;
     }
@@ -253,39 +384,76 @@
       if (k && k.t === 'op' && (k.v === '-' || k.v === '+')) {
         pos++;
         var u = unary();
-        return k.v === '-' ? function (x) { return u(x).neg(); } : u;
+        return k.v === '-' ? { k: 'un', a: u } : u;
       }
       return power();
     }
 
-    /* 工厂函数：绝不能在循环里 var L = left 再闭包捕获 ——
-       所有闭包会共享同一个绑定，三项以上的表达式直接无限递归。 */
-    function binop(op, L, R) {
-      if (op === '*') return function (x) { return L(x).mul(R(x)); };
-      if (op === '/') return function (x) { return L(x).div(R(x)); };
-      if (op === '+') return function (x) { return L(x).plus(R(x)); };
-      return function (x) { return L(x).minus(R(x)); };
-    }
-
     function term() {
       var left = unary();
-      while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
-        left = binop(ts[pos++].v, left, unary());
+      while (peek()) {
+        var k = peek();
+        if (k.t === 'op' && (k.v === '*' || k.v === '/')) {
+          pos++;
+          left = { k: 'bin', op: k.v, l: left, r: unary() };
+        } else if (canStartImplicitFactor(k)) {
+          left = { k: 'bin', op: '*', l: left, r: power() };
+        } else {
+          break;
+        }
       }
       return left;
     }
 
     function expr() {
       var left = term();
-      while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
-        left = binop(ts[pos++].v, left, term());
+      while (peek() && peek().t === 'op' && (peek().v === '+' || kIsMinusOrPlus(peek()))) {
+        left = { k: 'bin', op: ts[pos++].v, l: left, r: term() };
       }
       return left;
     }
+    function kIsMinusOrPlus(k) { return k.v === '+' || k.v === '-'; }
 
-    var fn = expr();
+    var ast = expr();
     if (pos !== ts.length) throw new Error('表达式语法错误：位置 ' + pos + ' 起有多余内容');
-    return fn;
+    return ast;
+  }
+
+  function compileDec(src) {
+    var ast = parseHpAst(src);
+    function compileNode(node) {
+      if (node.k === 'num') {
+        var lit = node.v;
+        return function () { return new D(lit); };
+      }
+      if (node.k === 'var') return function (x) { return x; };
+      if (node.k === 'const') {
+        var cfn = DCONSTS[node.name];
+        return function () { return cfn(); };
+      }
+      if (node.k === 'un') {
+        var a = compileNode(node.a);
+        return function (x) { return a(x).neg(); };
+      }
+      if (node.k === 'bin') {
+        var L = compileNode(node.l), R = compileNode(node.r);
+        if (node.op === '^') return function (x) { return safePow(L(x), R(x)); };
+        if (node.op === '*') return function (x) { return L(x).mul(R(x)); };
+        if (node.op === '/') return function (x) { return L(x).div(R(x)); };
+        if (node.op === '+') return function (x) { return L(x).plus(R(x)); };
+        return function (x) { return L(x).minus(R(x)); };
+      }
+      if (node.k === 'fn') {
+        var fn = DFUNCS[node.name];
+        var A = node.args.map(compileNode);
+        return function (x) {
+          var vs = A.map(function (f) { return f(x); });
+          return fn.apply(null, vs);
+        };
+      }
+      throw new Error('表达式编译错误');
+    }
+    return compileNode(ast);
   }
 
   /* 安全求值包装 */
@@ -298,10 +466,8 @@
      { b, d }（语义为 b + d），从而 1 - (1, -off) = (0, +off) 零有效位损失，
      无须把 Decimal 工作精度拉高到 300+ 位即可高精度处理任意强端点奇点。 */
   function compileSplitDec(src) {
-    var ts = insertImplicit(tokenize(src)), pos = 0;
+    var ast = parseHpAst(src);
     var ZERO = new D(0), TWO = new D(2);
-    function peek() { return ts[pos]; }
-    function eat(t) { var k = ts[pos]; if (!k || k.t !== t) throw new Error('表达式语法错误'); pos++; return k; }
 
     function sdAdd(L, R) { return { b: L.b.plus(R.b), d: L.d.plus(R.d) }; }
     function sdSub(L, R) { return { b: L.b.minus(R.b), d: L.d.minus(R.d) }; }
@@ -437,103 +603,48 @@
       return { b: vBase, d: vFull.minus(vBase) };
     }
 
-    function atom() {
-      var k = peek();
-      if (!k) throw new Error('表达式意外结束');
-      if (k.t === 'num') { pos++; var lit = k.v; return function () { return { b: new D(lit), d: ZERO }; }; }
-      if (k.t === 'id') {
-        pos++;
-        var name = k.v.toLowerCase();
-        if (name === 'x') return function (anc, off) { return { b: anc, d: off }; };
-        if (Object.prototype.hasOwnProperty.call(DCONSTS, name)) {
-          var cfn = DCONSTS[name];
-          return function () { return { b: cfn(), d: ZERO }; };
+    function compileNode(node) {
+      if (node.k === 'num') {
+        var lit = node.v;
+        return function () { return { b: new D(lit), d: ZERO }; };
+      }
+      if (node.k === 'var') return function (anc, off) { return { b: anc, d: off }; };
+      if (node.k === 'const') {
+        var cfn = DCONSTS[node.name];
+        return function () { return { b: cfn(), d: ZERO }; };
+      }
+      if (node.k === 'un') {
+        var a = compileNode(node.a);
+        return function (anc, off) { var r = a(anc, off); return { b: r.b.neg(), d: r.d.neg() }; };
+      }
+      if (node.k === 'bin') {
+        var L = compileNode(node.l), R = compileNode(node.r);
+        if (node.op === '^') return function (anc, off) { return sdPow(L(anc, off), R(anc, off)); };
+        if (node.op === '*') return function (anc, off) { return sdMul(L(anc, off), R(anc, off)); };
+        if (node.op === '/') return function (anc, off) { return sdDiv(L(anc, off), R(anc, off)); };
+        if (node.op === '+') return function (anc, off) { return sdAdd(L(anc, off), R(anc, off)); };
+        return function (anc, off) { return sdSub(L(anc, off), R(anc, off)); };
+      }
+      if (node.k === 'fn') {
+        var name = node.name;
+        var fn = DFUNCS[name];
+        var A = node.args.map(compileNode);
+        if (A.length === 1) {
+          var a0 = A[0];
+          return function (anc, off) { return sdCall1(name, fn, a0(anc, off)); };
         }
-        if (peek() && peek().t === 'lp') {
-          pos++;
-          var args = [];
-          if (!(peek() && peek().t === 'rp')) {
-            args.push(expr());
-            while (peek() && peek().t === 'comma') { pos++; args.push(expr()); }
-          }
-          eat('rp');
-          var fn = DFUNCS[name];
-          if (!fn) throw new Error('未知函数「' + name + '」');
-          var A = args.slice();
-          if (A.length === 1) {
-            var a0 = A[0];
-            return function (anc, off) { return sdCall1(name, fn, a0(anc, off)); };
-          }
-          if (name === 'pow' && A.length === 2) {
-            return function (anc, off) { return sdPow(A[0](anc, off), A[1](anc, off)); };
-          }
-          return function (anc, off) {
-            var vs = A.map(function (f) { var r = f(anc, off); return r.b.plus(r.d); });
-            return { b: ZERO, d: fn.apply(null, vs) };
-          };
+        if (name === 'pow' && A.length === 2) {
+          return function (anc, off) { return sdPow(A[0](anc, off), A[1](anc, off)); };
         }
-        throw new Error('未知标识符「' + name + '」');
+        return function (anc, off) {
+          var vs = A.map(function (f) { var r = f(anc, off); return r.b.plus(r.d); });
+          return { b: ZERO, d: fn.apply(null, vs) };
+        };
       }
-      if (k.t === 'lp') {
-        pos++;
-        var inner = expr();
-        eat('rp');
-        return inner;
-      }
-      if (k.t === 'op' && (k.v === '-' || k.v === '+')) {
-        pos++;
-        var u = unary();
-        return k.v === '-' ? function (anc, off) { var r = u(anc, off); return { b: r.b.neg(), d: r.d.neg() }; } : u;
-      }
-      throw new Error('表达式语法错误');
+      throw new Error('表达式编译错误');
     }
 
-    function power() {
-      var base = atom();
-      if (peek() && peek().t === 'op' && peek().v === '^') {
-        pos++;
-        var ex = unary();
-        return function (anc, off) { return sdPow(base(anc, off), ex(anc, off)); };
-      }
-      return base;
-    }
-
-    function unary() {
-      var k = peek();
-      if (k && k.t === 'op' && (k.v === '-' || k.v === '+')) {
-        pos++;
-        var u = unary();
-        return k.v === '-' ? function (anc, off) { var r = u(anc, off); return { b: r.b.neg(), d: r.d.neg() }; } : u;
-      }
-      return power();
-    }
-
-    function binop(op, L, R) {
-      if (op === '*') return function (anc, off) { return sdMul(L(anc, off), R(anc, off)); };
-      if (op === '/') return function (anc, off) { return sdDiv(L(anc, off), R(anc, off)); };
-      if (op === '+') return function (anc, off) { return sdAdd(L(anc, off), R(anc, off)); };
-      return function (anc, off) { return sdSub(L(anc, off), R(anc, off)); };
-    }
-
-    function term() {
-      var left = unary();
-      while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
-        left = binop(ts[pos++].v, left, unary());
-      }
-      return left;
-    }
-
-    function expr() {
-      var left = term();
-      while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
-        left = binop(ts[pos++].v, left, term());
-      }
-      return left;
-    }
-
-    var fn = expr();
-    if (pos !== ts.length) throw new Error('表达式语法错误');
-    return fn;
+    return compileNode(ast);
   }
 
   function evalSplitDec(gSplit, anchor, off) {
@@ -562,6 +673,9 @@
     var tailTol = new D(10).pow(-(targetDigits + 7));
     var nearA = D.max(a.abs(), one).mul(new D(10).pow(-(Math.max(10, D.precision - 3))));
     var nearB = D.max(b.abs(), one).mul(new D(10).pow(-(Math.max(10, D.precision - 3))));
+    var quadCutA = D.max(a.abs(), one).mul(new D(10).pow(-(Math.floor(D.precision / 2) - 2)));
+    var quadCutB = D.max(b.abs(), one).mul(new D(10).pow(-(Math.floor(D.precision / 2) - 2)));
+    var cancelDropTol = new D(10).pow(-Math.max(12, targetDigits));
 
     var rawSum = new D(0), absRawSum = new D(0);
     var prev = null, best = null, totalEvals = 0;
@@ -620,8 +734,17 @@
           var v1 = gSplit ? evalSplitDec(gSplit, b, off.neg()) : evalDec(g, xp);
           totalEvals++;
           if (!v1.isFinite()) {
-            if (off.lte(nearB) && k > 3) doneR = true;
-            else { mathAborted = true; break; }
+            var estDropR = lastVR ? w.mul(lastVR.plus(one)) : w;
+            if (k > 3 && off.lte(nearB)) {
+              doneR = true;
+            } else if (k > 3 && off.lte(quadCutB) && prevAR && !absRawSum.isZero()) {
+              if (estDropR.lte(absRawSum.mul(cancelDropTol)) && prevAR.lte(absRawSum.mul('1e-3'))) {
+                doneR = true;
+              } else if (prevAR.lte(absRawSum.mul('0.05'))) {
+                tailTrunc = D.max(tailTrunc, prevAR.mul('10'));
+                doneR = true;
+              } else { mathAborted = true; break; }
+            } else { mathAborted = true; break; }
           } else {
             var v1Abs = v1.abs();
             /* 仅当此前函数幅值有界（非奇点增长）且上一项已衰减至 tailTol 量级，却在极深处突现 1e10 倍爆噪，才判为 0/0 舍入尖刺 */
@@ -653,8 +776,17 @@
           var v2 = gSplit ? evalSplitDec(gSplit, a, off) : evalDec(g, xm);
           totalEvals++;
           if (!v2.isFinite()) {
-            if (off.lte(nearA) && k > 3) doneL = true;
-            else { mathAborted = true; break; }
+            var estDropL = lastVL ? w.mul(lastVL.plus(one)) : w;
+            if (k > 3 && off.lte(nearA)) {
+              doneL = true;
+            } else if (k > 3 && off.lte(quadCutA) && prevAL && !absRawSum.isZero()) {
+              if (estDropL.lte(absRawSum.mul(cancelDropTol)) && prevAL.lte(absRawSum.mul('1e-3'))) {
+                doneL = true;
+              } else if (prevAL.lte(absRawSum.mul('0.05'))) {
+                tailTrunc = D.max(tailTrunc, prevAL.mul('10'));
+                doneL = true;
+              } else { mathAborted = true; break; }
+            } else { mathAborted = true; break; }
           } else {
             var v2Abs = v2.abs();
             if (tNum >= 2.5 && off.lt(noiseCut) && lastVL && prevLastVL && prevAL && !absRawSum.isZero() &&
@@ -1091,7 +1223,7 @@
 
     /* Split-Decimal 已彻底消除端点 1−x 与 (e^x-1-x)/x² 抵消；按目标位数自适应工作精度兼顾速度与超高精度 */
     var workPrec;
-    if (o.fastPrec) workPrec = Math.max(targetDigits + 14, 30);
+    if (o.fastPrec) workPrec = Math.max(targetDigits * 2 + 6, 36);
     else if (targetDigits <= 18) workPrec = Math.max(targetDigits + 22, 42);
     else if (targetDigits <= 25) workPrec = Math.max(targetDigits + 52, 82);
     else workPrec = Math.max(targetDigits + 52, 87);
@@ -1846,9 +1978,9 @@
     if (!fa.isFinite() || !fb.isFinite() || fa.mul(fb).gt(0)) return null;
     if (fa.isZero()) return a;
     if (fb.isZero()) return b;
-    var fTol = new D('1e-40');
+    var fTol = tol.mul(new D('1e-8'));
     var x0 = a, f0 = fa, x1 = b, f1 = fb;
-    for (var it = 0; it < 40; it++) {
+    for (var it = 0; it < 80; it++) {
       if (b.minus(a).abs().lte(tol)) break;
       var mid = a.plus(b).div(2);
       var c = mid;
@@ -1870,10 +2002,12 @@
 
   function integrateOscGeneral(fNum, aRaw, bRaw, zerosApprox, opt) {
     var o = opt || {};
-    if (!fNum || !fNum.src || !Array.isArray(zerosApprox) || zerosApprox.length < 48) return null;
+    var hasPanelSings = !!(o.panelSings && Array.isArray(o.panelSings.panels));
+    if (!fNum || !fNum.src || !Array.isArray(zerosApprox) || zerosApprox.length < (hasPanelSings ? 22 : 48)) return null;
     var digits = o.digits || 25;
     var oldPrec = D.precision;
-    D.set({ precision: digits + 25 });
+    var deepPrec = hasPanelSings ? Math.max(digits * 2 + 12, 46) : (digits + 25);
+    D.set({ precision: deepPrec });
     try {
       var A = parseBoundDec(aRaw), B = parseBoundDec(bRaw);
       var a = A.num, b = B.num;
@@ -1902,10 +2036,23 @@
         var r = dir * (zerosApprox[i] - anchorNum);
         if (r > 0) rsApprox.push(r);
       }
-      if (rsApprox.length < 46) return null;
+      var targetPanels = 44, n1Cfg = 34;
+      if (hasPanelSings) {
+        if (digits <= 14) { targetPanels = 22; n1Cfg = 16; }
+        else if (digits <= 20) { targetPanels = 30; n1Cfg = 24; }
+        else if (digits <= 25) { targetPanels = 40; n1Cfg = 34; }
+        else { targetPanels = 54; n1Cfg = 46; }
+        if (rsApprox.length < targetPanels + 1) {
+          if (rsApprox.length < 22) return null;
+          targetPanels = rsApprox.length - 1;
+          n1Cfg = Math.max(12, targetPanels - 6);
+        }
+      } else if (rsApprox.length < 46) {
+        return null;
+      }
 
-      var zTol = new D(10).pow(-(digits + 14));
-      var needZeros = Math.min(rsApprox.length, 46);
+      var zTol = hasPanelSings ? new D(10).pow(-(deepPrec - 6)) : new D(10).pow(-(digits + 14));
+      var needZeros = hasPanelSings ? Math.min(rsApprox.length, targetPanels + 2) : Math.min(rsApprox.length, 46);
       var rZeros = [];
       for (var k = 0; k < needZeros; k++) {
         var prevGap = k === 0 ? rsApprox[0] : (rsApprox[k] - rsApprox[k - 1]);
@@ -1917,42 +2064,298 @@
         rZeros.push(rz);
       }
 
-      /* 首段 [0, z_0] 用 tanhSinh */
-      var initVal = new D(0), initEvals = 0, initDiff = new D(0);
-      if (startR.lt(rZeros[0])) {
-        var r0 = tanhSinh(gDec, startR, rZeros[0], { digits: digits + 2, maxLevel: 7, maxEvals: 3500, maxMs: o.maxMs || 15000, gSplit: gSplitR });
-        if (!r0 || !r0.value || !r0.value.isFinite() || r0.aborted) return null;
-        if (!r0.converged) {
-          var r0Diff = r0.prev ? r0.value.minus(r0.prev).abs() : new D(Infinity);
-          if (r0Diff.gt(r0.value.abs().plus(1e-300).mul('1e-15'))) return null;
-        }
-        initVal = r0.value; initEvals = r0.evals;
-        if (r0.prev) initDiff = r0.value.minus(r0.prev).abs();
-      }
-
-      /* 用 GL32 vs GL24 检验（避免 sin³x/x³ 等高次谐波被 GL16 误判而整排细分） */
       var rule32 = glStdRule(32), rule24 = glStdRule(24);
-      var panelTol = new D(10).pow(-(digits + 6));
       var counter = { n: 0 };
-      var panels = [], nPanels = Math.min(44, rZeros.length - 1);
-      var needAdaptiveAll = false;
-      for (var m = 0; m < nPanels; m++) {
-        var pv;
-        if (needAdaptiveAll || m < 2 || (m % 8 === 0)) {
-          var before = counter.n;
-          pv = glIntegrateAdaptive(gDec, rZeros[m], rZeros[m + 1], panelTol, 0, rule32, rule24, counter);
-          if (m >= 4 && counter.n - before > rule32.n + rule24.n) needAdaptiveAll = true;
-        } else {
-          pv = glIntegratePanel(gDec, rZeros[m], rZeros[m + 1], rule32);
-          counter.n += rule32.n;
+      var initVal = new D(0), initEvals = 0, initDiff = new D(0), quadErrEst = new D(0);
+      var panels = [], nPanels;
+
+      if (hasPanelSings) {
+        var bulkPrec = Math.max(digits + 7, 22);
+        var PI = decPI(), HPi = PI.div(2), one = new D(1), two = new D(2);
+        var tailTol = new D(10).pow(-(digits + 5));
+        var minDeltaStop = new D(10).pow(-Math.max(40, deepPrec - 6));
+        var quadCutScale = new D(10).pow(-(Math.floor(deepPrec / 2) - 2));
+        var cancelDropTol = new D(10).pow(-Math.max(12, digits));
+        var tsCache = {};
+
+        function buildTsTable(level) {
+          if (tsCache[level]) return tsCache[level];
+          D.set({ precision: deepPrec });
+          var h = two.pow(-level);
+          var nodes = [];
+          var expFull = new D(10).pow(deepPrec + 5);
+          var expAsymp = deepPrec * 3 + 25;
+          for (var tk = 1; tk < 4000; tk++) {
+            var t = h.mul(tk), tNum = t.toNumber();
+            if (tNum > 6.5) break;
+            var sh = t.sinh(), ch = t.cosh(), u2 = PI.mul(sh);
+            if (u2.gt(expAsymp)) break;
+            var e2u = u2.exp();
+            var delta = two.div(e2u.plus(one));
+            var frac = e2u.gt(expFull) ? one : e2u.div(e2u.plus(one));
+            var w = PI.mul(ch).mul(delta).mul(frac);
+            if (delta.lt(minDeltaStop)) break;
+            var dExp = Math.max(0, Math.ceil(-Math.log10(Math.max(delta.toNumber(), 1e-300))));
+            nodes.push({
+              t: tNum,
+              delta: delta,
+              w: w,
+              reqPrec: Math.min(deepPrec, Math.max(bulkPrec, bulkPrec + dExp))
+            });
+          }
+          tsCache[level] = { h: h, nodes: nodes };
+          return tsCache[level];
         }
-        if (!pv.isFinite()) return null;
-        panels.push(pv);
+
+        function refineSingDec(sApproxNum, rA, rB) {
+          D.set({ precision: deepPrec });
+          var mid = rA.plus(rB).div(two);
+          var spanNum = rB.minus(rA).toNumber();
+          if (Math.abs(sApproxNum - mid.toNumber()) <= 1e-4 * Math.max(spanNum, 1e-12)) {
+            var vm = evalDec(gDec, mid); counter.n++;
+            if (!vm.isFinite() || vm.abs().gt(new D(10).pow(Math.max(15, Math.floor(deepPrec * 0.44))))) return mid;
+          }
+          var win = Math.max(1e-4 * (1 + Math.abs(sApproxNum)), 1e-5);
+          var tiny = rB.minus(rA).mul('1e-12');
+          var loS = D.max(rA.plus(tiny), new D(sApproxNum - win));
+          var hiS = D.min(rB.minus(tiny), new D(sApproxNum + win));
+          if (!hiS.gt(loS)) return null;
+          var phi = decPHI().minus(one);
+          var x1 = hiS.minus(phi.mul(hiS.minus(loS)));
+          var x2 = loS.plus(phi.mul(hiS.minus(loS)));
+          var v1 = evalDec(gDec, x1), v2 = evalDec(gDec, x2); counter.n += 2;
+          var m1s = v1.isFinite() ? v1.abs() : new D(Infinity);
+          var m2s = v2.isFinite() ? v2.abs() : new D(Infinity);
+          var singRefined = null;
+          for (var gs = 0; gs < 220; gs++) {
+            if (hiS.minus(loS).lte(zTol)) break;
+            if (!v1.isFinite()) { singRefined = x1; break; }
+            if (!v2.isFinite()) { singRefined = x2; break; }
+            if (m1s.gt(m2s)) {
+              hiS = x2; x2 = x1; v2 = v1; m2s = m1s;
+              x1 = hiS.minus(phi.mul(hiS.minus(loS)));
+              v1 = evalDec(gDec, x1); counter.n++;
+              m1s = v1.isFinite() ? v1.abs() : new D(Infinity);
+            } else {
+              loS = x1; x1 = x2; v1 = v2; m1s = m2s;
+              x2 = loS.plus(phi.mul(hiS.minus(loS)));
+              v2 = evalDec(gDec, x2); counter.n++;
+              m2s = v2.isFinite() ? v2.abs() : new D(Infinity);
+            }
+          }
+          if (!singRefined) singRefined = loS.plus(hiS).div(two);
+          return (singRefined.gt(rA) && singRefined.lt(rB)) ? singRefined : null;
+        }
+
+        function evalHalfTS(rA, rB, singSide, table) {
+          D.set({ precision: deepPrec });
+          var c = rA.plus(rB).div(two), d = rB.minus(rA).div(two);
+          var quadCutA = D.max(rA.abs(), one).mul(quadCutScale);
+          var quadCutB = D.max(rB.abs(), one).mul(quadCutScale);
+          var nearA = D.max(rA.abs(), one).mul(new D(10).pow(-(deepPrec - 3)));
+          var nearB = D.max(rB.abs(), one).mul(new D(10).pow(-(deepPrec - 3)));
+          var singLo = (singSide === 'lo' || singSide === 'both');
+          var singHi = (singSide === 'hi' || singSide === 'both');
+          D.set({ precision: bulkPrec });
+          var gMid = evalDec(gDec, c); counter.n++;
+          if (!gMid.isFinite()) return new D(NaN);
+          var rawSum = HPi.mul(gMid), absRawSum = rawSum.abs();
+          var doneL = false, doneR = false, smallL = 0, smallR = 0;
+          var lastVR = null, prevAR = null, lastVL = null, prevAL = null;
+          var nodes = table.nodes;
+          for (var ni = 0; ni < nodes.length; ni++) {
+            var nd = nodes[ni];
+            var off = d.mul(nd.delta), w = nd.w;
+            if (off.isZero()) break;
+            if (!doneR) {
+              D.set({ precision: singHi ? nd.reqPrec : bulkPrec });
+              var xp = rB.minus(off);
+              if (xp.gte(rB)) doneR = true;
+              else {
+                var v1 = evalDec(gDec, xp); counter.n++;
+                if (!v1.isFinite()) {
+                  var estDropR = lastVR ? w.mul(lastVR.plus(one)) : w;
+                  if (ni > 2 && (off.lte(nearB) ||
+                      (off.lte(quadCutB) && prevAR && !absRawSum.isZero() &&
+                       prevAR.lte(absRawSum.mul('1e-3')) && estDropR.lte(absRawSum.mul(cancelDropTol))))) {
+                    doneR = true;
+                  } else { return new D(NaN); }
+                } else {
+                  var t1 = w.mul(v1), a1 = t1.abs();
+                  rawSum = rawSum.plus(t1); absRawSum = absRawSum.plus(a1);
+                  lastVR = v1.abs(); prevAR = a1;
+                  if (nd.t >= 1.5 && a1.lte(absRawSum.mul(tailTol))) { if (++smallR >= 2) doneR = true; } else smallR = 0;
+                }
+              }
+            }
+            if (!doneL) {
+              D.set({ precision: singLo ? nd.reqPrec : bulkPrec });
+              var xm = rA.plus(off);
+              if (xm.lte(rA)) doneL = true;
+              else {
+                var v2 = evalDec(gDec, xm); counter.n++;
+                if (!v2.isFinite()) {
+                  var estDropL = lastVL ? w.mul(lastVL.plus(one)) : w;
+                  if (ni > 2 && (off.lte(nearA) ||
+                      (off.lte(quadCutA) && prevAL && !absRawSum.isZero() &&
+                       prevAL.lte(absRawSum.mul('1e-3')) && estDropL.lte(absRawSum.mul(cancelDropTol))))) {
+                    doneL = true;
+                  } else { return new D(NaN); }
+                } else {
+                  var t2 = w.mul(v2), a2 = t2.abs();
+                  rawSum = rawSum.plus(t2); absRawSum = absRawSum.plus(a2);
+                  lastVL = v2.abs(); prevAL = a2;
+                  if (nd.t >= 1.5 && a2.lte(absRawSum.mul(tailTol))) { if (++smallL >= 2) doneL = true; } else smallL = 0;
+                }
+              }
+            }
+            if (doneL && doneR) break;
+          }
+          D.set({ precision: deepPrec });
+          return rawSum.mul(table.h).mul(d);
+        }
+
+        function evalPanelSplit(rA, rB, approxSings, level) {
+          D.set({ precision: deepPrec });
+          if (!approxSings || !approxSings.length) {
+            counter.n += rule32.n;
+            return glIntegratePanel(gDec, rA, rB, rule32);
+          }
+          var sDecs = [];
+          for (var si = 0; si < approxSings.length; si++) {
+            var sd = refineSingDec(approxSings[si], rA, rB);
+            if (sd && (!sDecs.length || sd.gt(sDecs[sDecs.length - 1]))) sDecs.push(sd);
+          }
+          if (!sDecs.length) {
+            counter.n += rule32.n;
+            return glIntegratePanel(gDec, rA, rB, rule32);
+          }
+          var pts = [rA].concat(sDecs, [rB]);
+          var table = buildTsTable(level);
+          var sumP = new D(0);
+          for (var pi = 0; pi + 1 < pts.length; pi++) {
+            var loS = pi > 0, hiS = (pi + 1 < pts.length - 1);
+            var side = (loS && hiS) ? 'both' : loS ? 'lo' : hiS ? 'hi' : 'none';
+            var subV = evalHalfTS(pts[pi], pts[pi + 1], side, table);
+            if (!subV.isFinite()) return new D(NaN);
+            sumP = sumP.plus(subV);
+          }
+          D.set({ precision: deepPrec });
+          return sumP;
+        }
+
+        function getApproxSings(m, rA, rB) {
+          if (o.panelSings.panels[m]) return o.panelSings.panels[m];
+          var refList = (m % 2 === 0 ? o.panelSings.panels[0] : o.panelSings.panels[1]) || [];
+          var refA = (m % 2 === 0 ? rsApprox[0] : rsApprox[1]);
+          var refB = (m % 2 === 0 ? rsApprox[1] : rsApprox[2]);
+          var rA0 = rA.toNumber(), rB0 = rB.toNumber();
+          return refList.map(function (s) {
+            var fr = (s - refA) / Math.max(refB - refA, 1e-300);
+            return rA0 + fr * (rB0 - rA0);
+          });
+        }
+
+        var initApprox = o.panelSings.init || [];
+        var Luse = 5, p0Calibrated = null;
+        if (startR.lt(rZeros[0]) && initApprox.length > 0) {
+          var v4 = evalPanelSplit(startR, rZeros[0], initApprox, 4);
+          var v5 = evalPanelSplit(startR, rZeros[0], initApprox, 5);
+          if (!v4.isFinite() || !v5.isFinite()) return null;
+          var diff45 = v5.minus(v4).abs();
+          var calTolLow = D.max(v5.abs(), new D('1e-300')).mul(new D(10).pow(-digits));
+          var calTolHi = D.max(v5.abs(), new D('1e-300')).mul(new D(10).pow(-(digits + 1)));
+          if (digits <= 25 && diff45.lte(calTolLow)) {
+            Luse = 4; initVal = v5; quadErrEst = diff45;
+          } else if (digits > 25 && diff45.gt(calTolHi)) {
+            var v6 = evalPanelSplit(startR, rZeros[0], initApprox, 6);
+            if (!v6.isFinite()) return null;
+            Luse = 6; initVal = v6; quadErrEst = v6.minus(v5).abs();
+          } else {
+            Luse = 5; initVal = v5; quadErrEst = diff45;
+          }
+          initDiff = quadErrEst;
+        } else {
+          if (startR.lt(rZeros[0])) {
+            var r0S = tanhSinh(gDec, startR, rZeros[0], { digits: digits + 2, maxLevel: 7, maxEvals: 3500, maxMs: o.maxMs || 15000, gSplit: gSplitR });
+            if (!r0S || !r0S.value || !r0S.value.isFinite() || r0S.aborted) return null;
+            if (!r0S.converged) {
+              var r0SDiff = r0S.prev ? r0S.value.minus(r0S.prev).abs() : new D(Infinity);
+              if (r0SDiff.gt(r0S.value.abs().plus(1e-300).mul('1e-15'))) return null;
+            }
+            initVal = r0S.value; initEvals = r0S.evals;
+            if (r0S.prev) initDiff = r0S.value.minus(r0S.prev).abs();
+          }
+          var s0Cal = getApproxSings(0, rZeros[0], rZeros[1]);
+          if (s0Cal.length > 0) {
+            var p0v4 = evalPanelSplit(rZeros[0], rZeros[1], s0Cal, 4);
+            var p0v5 = evalPanelSplit(rZeros[0], rZeros[1], s0Cal, 5);
+            if (!p0v4.isFinite() || !p0v5.isFinite()) return null;
+            var pdiff45 = p0v5.minus(p0v4).abs();
+            var pcalTolLow = D.max(p0v5.abs(), new D('1e-300')).mul(new D(10).pow(-digits));
+            var pcalTolHi = D.max(p0v5.abs(), new D('1e-300')).mul(new D(10).pow(-(digits + 1)));
+            if (digits <= 25 && pdiff45.lte(pcalTolLow)) {
+              Luse = 4; p0Calibrated = p0v5; quadErrEst = pdiff45;
+            } else if (digits > 25 && pdiff45.gt(pcalTolHi)) {
+              var p0v6 = evalPanelSplit(rZeros[0], rZeros[1], s0Cal, 6);
+              if (!p0v6.isFinite()) return null;
+              Luse = 6; p0Calibrated = p0v6; quadErrEst = p0v6.minus(p0v5).abs();
+            } else {
+              Luse = 5; p0Calibrated = p0v5; quadErrEst = pdiff45;
+            }
+          }
+        }
+
+        nPanels = Math.min(targetPanels, rZeros.length - 1);
+        for (var mS = 0; mS < nPanels; mS++) {
+          var pvS = (mS === 0 && p0Calibrated !== null)
+            ? p0Calibrated
+            : evalPanelSplit(rZeros[mS], rZeros[mS + 1], getApproxSings(mS, rZeros[mS], rZeros[mS + 1]), Luse);
+          if (!pvS.isFinite()) return null;
+          panels.push(pvS);
+        }
+        var lastSings = getApproxSings(nPanels - 1, rZeros[nPanels - 1], rZeros[nPanels]);
+        if (lastSings.length > 0 && Luse < 6) {
+          var vLastChk = evalPanelSplit(rZeros[nPanels - 1], rZeros[nPanels], lastSings, Luse + 1);
+          if (!vLastChk.isFinite()) return null;
+          quadErrEst = D.max(quadErrEst, vLastChk.minus(panels[nPanels - 1]).abs().mul(nPanels));
+        }
+      } else {
+        /* 首段 [0, z_0] 用 tanhSinh */
+        if (startR.lt(rZeros[0])) {
+          var r0 = tanhSinh(gDec, startR, rZeros[0], { digits: digits + 2, maxLevel: 7, maxEvals: 3500, maxMs: o.maxMs || 15000, gSplit: gSplitR });
+          if (!r0 || !r0.value || !r0.value.isFinite() || r0.aborted) return null;
+          if (!r0.converged) {
+            var r0Diff = r0.prev ? r0.value.minus(r0.prev).abs() : new D(Infinity);
+            if (r0Diff.gt(r0.value.abs().plus(1e-300).mul('1e-15'))) return null;
+          }
+          initVal = r0.value; initEvals = r0.evals;
+          if (r0.prev) initDiff = r0.value.minus(r0.prev).abs();
+        }
+
+        /* 用 GL32 vs GL24 检验（避免 sin³x/x³ 等高次谐波被 GL16 误判而整排细分） */
+        var panelTol = new D(10).pow(-(digits + 6));
+        nPanels = Math.min(44, rZeros.length - 1);
+        var needAdaptiveAll = false;
+        for (var m = 0; m < nPanels; m++) {
+          var pv;
+          if (needAdaptiveAll || m < 2 || (m % 8 === 0)) {
+            var before = counter.n;
+            pv = glIntegrateAdaptive(gDec, rZeros[m], rZeros[m + 1], panelTol, 0, rule32, rule24, counter);
+            if (m >= 4 && counter.n - before > rule32.n + rule24.n) needAdaptiveAll = true;
+          } else {
+            pv = glIntegratePanel(gDec, rZeros[m], rZeros[m + 1], rule32);
+            counter.n += rule32.n;
+          }
+          if (!pv.isFinite()) return null;
+          panels.push(pv);
+        }
       }
 
       /* 跳过前几片直到进入严格交替段（最多跳 4 片） */
+      var minTailCheck = hasPanelSings ? Math.min(36, targetPanels) : 36;
       var skip = 0;
-      while (skip + 36 < panels.length) {
+      while (skip + minTailCheck < panels.length) {
         var okTail = true;
         for (var j = skip + 1; j < panels.length; j++) {
           if (panels[j].mul(panels[j - 1]).gte(0)) { okTail = false; break; }
@@ -1961,7 +2364,8 @@
         skip++;
       }
       var tailPanels = panels.slice(skip);
-      if (tailPanels.length < 34) return null;
+      var minTailLen = hasPanelSings ? Math.max(14, targetPanels - 4) : 34;
+      if (tailPanels.length < minTailLen) return null;
       for (var j2 = 1; j2 < tailPanels.length; j2++) {
         if (tailPanels[j2].mul(tailPanels[j2 - 1]).gte(0)) return null;
       }
@@ -1976,9 +2380,11 @@
         if (!mags[mm].lt(mags[mm - 1])) { mono = false; break; }
       }
 
-      var n1 = Math.min(34, tailPanels.length - 6);
+      var n1 = hasPanelSings
+        ? Math.min(n1Cfg, tailPanels.length - 4)
+        : Math.min(34, tailPanels.length - 6);
       var n2 = tailPanels.length;
-      if (n1 < 20) return null;
+      if (n1 < (hasPanelSings ? 10 : 20)) return null;
 
       var bestVal = null, bestGap = null, bestMethod = '';
 
@@ -1988,7 +2394,7 @@
         var sgn0 = tailPanels[0].s;
         bestVal = preSum.plus(sgn0 >= 0 ? c2 : c2.neg());
         bestGap = cGap;
-        bestMethod = 'CVZ';
+        bestMethod = hasPanelSings ? '奇点拆分双指数 + CVZ' : 'CVZ';
       }
 
       var sums = [], acc = new D(0);
@@ -2003,10 +2409,10 @@
       if (w2.value.isFinite() && (!bestGap || wGap.lt(bestGap))) {
         bestVal = preSum.plus(w2.value);
         bestGap = wGap;
-        bestMethod = 'Decimal Wynn-ε';
+        bestMethod = hasPanelSings ? '奇点拆分双指数 + Decimal Wynn-ε' : 'Decimal Wynn-ε';
       }
 
-      if (!mono && tailPanels.length >= 30) {
+      if (!mono && tailPanels.length >= 30 && !hasPanelSings) {
         /* 若非单调交替（例如带非零偏置的 (sin u + c)/u²），追加面板至 58 片（29 对）以提升 Levin-u 至 22+ 位 */
         var extraTarget = Math.min(58, rsApprox.length - 1);
         if (extraTarget > nPanels) {
@@ -2057,15 +2463,16 @@
       }
 
       if (!bestVal || !bestVal.isFinite() || !bestGap) return null;
+      D.set({ precision: deepPrec });
       var refScale = D.max(bestVal.abs(), initVal.abs(), mags[0], new D('1e-300'));
       var reqTol = bestMethod === '配对周期 Levin-u' ? new D('1e-12') : new D(10).pow(-(digits - 7));
       if (bestGap.gt(refScale.mul(reqTol))) return null;
 
-      var sig = D.max(bestGap.mul(10), initDiff.mul(10), refScale.mul(new D(10).pow(-digits)));
+      var sig = D.max(bestGap.mul(10), initDiff.mul(10), quadErrEst.mul(10), refScale.mul(new D(10).pow(-digits)));
       var dig = Math.min(40, sig.div(refScale).ln().div(new D(10).ln()).neg().toNumber());
       return {
         value: bestVal.toNumber(),
-        valueText: bestVal.toSignificantDigits(digits + 6).toFixed(),
+        valueText: bestVal.toSignificantDigits(Math.max(31, digits + 6)).toFixed(),
         sigma: sig.toNumber(),
         digits: Math.max(0, dig),
         panels: nPanels,

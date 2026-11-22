@@ -203,7 +203,14 @@
     .ig-panel{display:grid;gap:10px;padding:12px 14px}
     .ig-row{display:grid;grid-template-columns:minmax(0,1fr) 88px 88px;gap:8px;align-items:end}
     .ig-row label{display:grid;gap:4px;font-size:12px;color:var(--muted);font-weight:700}
-    .ig-row input{font-family:"Courier New",ui-monospace,monospace;font-size:15px;padding:9px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;width:100%;box-sizing:border-box}
+    .ig-row input{font-family:"Courier New",ui-monospace,monospace;font-size:15px;padding:9px 10px;border:1px solid var(--line);border-radius:12px;background:#fff;width:100%;box-sizing:border-box;transition:border-color .15s ease,box-shadow .15s ease}
+    .ig-row input:focus-visible{outline:2px solid rgba(14,116,144,.32);border-color:#0e7490}
+    .ig-parse-preview{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 11px;border-radius:11px;font-size:12px;line-height:1.45;border:1px solid var(--line);background:#f8fafc;color:#475569}
+    .ig-parse-preview.ok{border-color:rgba(14,116,144,.28);background:#f0f9ff;color:#075985}
+    .ig-parse-preview.ok > span{font-weight:750;flex:0 0 auto}
+    .ig-parse-preview.ok code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;font-weight:700;color:#0c4a6e;background:rgba(255,255,255,.82);padding:1px 6px;border-radius:6px;overflow-wrap:anywhere}
+    .ig-parse-preview.err{border-color:rgba(220,38,38,.30);background:#fef2f2;color:#b91c1c}
+    .ig-parse-preview.err > span:first-child{font-weight:750;flex:0 0 auto}
     .ig-controls{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:stretch;padding:10px 12px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.78)}
     .ig-ctrl-block{display:grid;gap:6px;min-width:0;align-content:center}
     .ig-ctrl-label{font-size:11.5px;color:var(--muted);font-weight:750;letter-spacing:.03em}
@@ -232,12 +239,19 @@
     .ig-guide.warn strong{color:#b45309}
     .ig-guide.info{border-color:rgba(14,116,144,.25);background:#f0f9ff;color:#075985}
     .ig-guide.info strong{color:#0e7490}
+    .ig-help-stack{display:grid;gap:8px}
     .ig-help{border:1px dashed rgba(148,163,184,.55);border-radius:14px;background:rgba(255,255,255,.68);font-size:12.5px;color:#475569}
     .ig-help summary{cursor:pointer;padding:8px 12px;font-weight:700;color:#0f172a;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:8px}
     .ig-help summary::-webkit-details-marker{display:none}
     .ig-help summary::after{content:'展开对比';font-size:11.5px;color:var(--accent);font-weight:700;flex:0 0 auto}
+    .ig-syntax-help summary::after{content:'展开教程'}
     .ig-help[open] summary::after{content:'收起'}
     .ig-help-body{padding:0 12px 10px;display:grid;gap:8px}
+    .ig-help-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+    .ig-help-card{background:#fff;border:1px solid var(--line);border-radius:11px;padding:8px 10px;display:grid;gap:4px;align-content:start}
+    .ig-help-card strong{font-size:12px;color:#0f172a}
+    .ig-help-card code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;background:#f1f5f9;padding:1px 4px;border-radius:4px;color:#0f172a}
+    .ig-help-card ul{margin:0;padding-left:16px;display:grid;gap:3px;font-size:11.5px;line-height:1.5;color:#475569}
     .ig-help-table{width:100%;border-collapse:collapse;font-size:12px}
     .ig-help-table th,.ig-help-table td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
     .ig-help-table th{color:var(--muted);font-weight:700;white-space:nowrap}
@@ -278,7 +292,7 @@
       .ig-actions{display:flex;gap:8px}
       #igRun{flex:1 1 auto;min-height:44px}
       #igStop{min-height:44px}
-      .ig-examples{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+      .ig-examples{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
       .ig-examples .button{min-height:40px;padding:6px 4px;font-size:12px;line-height:1.25;white-space:normal;text-align:center}
       #igCandidates th,#igCandidates td{padding:7px 6px;font-size:12.5px}
       #igCandidates code{font-size:12.5px}
@@ -289,13 +303,14 @@
   
   <main class="page-shell">
     <section class="solve-card glass-card content-card" id="integralPanel">
-      <div class="ries-kicker"><span>定积分层</span><strong>定积分 → 符号解 + 小数 + 闭式候选</strong><em>v2.17 · 后台多线程求积 + 可选数值精度/闭式开关 + 三支柱复核 · 复用原版 RIES 12.0.2</em></div>
+      <div class="ries-kicker"><span>定积分层</span><strong>定积分 → 符号解 + 小数 + 闭式候选</strong><em>v2.19 · 免括号简写输入 + 后台多线程求积 + 可选精度/闭式开关 + 三支柱复核 · 复用原版 RIES 12.0.2</em></div>
       <div class="ig-panel">
         <div class="ig-row">
-          <label>f(x)<input id="igF" value="abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" placeholder="如 abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" spellcheck="false"></label>
+          <label>f(x)<input id="igF" value="abs(sin(x))/(exp(x)+abs(sin(x)+cos(x)))" placeholder="如 sinx/(1+x^2)、exp-x^2、ln(((1+sinx)/(1-sinx))^2)/x" spellcheck="false"></label>
           <label>a<input id="igA" value="0" spellcheck="false"></label>
           <label>b<input id="igB" value="inf" spellcheck="false"></label>
         </div>
+        <div id="igParsePreview" class="ig-parse-preview" hidden></div>
         <div class="ig-controls">
           <div class="ig-ctrl-block">
             <span class="ig-ctrl-label">数值积分目标精度（决定求积深度与后台预算）</span>
@@ -318,24 +333,6 @@
           </label>
         </div>
         <div id="igGuide" class="ig-guide ok"><strong>推荐平衡档 · 25 位数值 + 三支柱全开（PSLQ + 52 位 Fail-Closed）</strong><span>默认推荐：在后台 Worker 跑完与桌面一致的高精度预算（不卡顿主界面），满足 PSLQ 深定标与 ≥17.5 位 52 位独立复核硬门槛，兼顾召回率与防误导。</span></div>
-        <details class="ig-help">
-          <summary>精度档位与「闭式搜索」开关使用指南（修改前必读）</summary>
-          <div class="ig-help-body">
-            <p class="subtle-note">自 v2.17 起，数值求积与确定性 PSLQ 运行在后台独立线程（Web Worker），手机与低配电脑也能跑完与桌面一致的深度，不再因卡顿被强行腰斩。</p>
-            <div class="table-wrap">
-              <table class="ig-help-table">
-                <thead><tr><th>精度档</th><th>数值层表现</th><th>对 PSLQ 与 Fail-Closed 复核的影响</th><th>耗时与适用场景</th></tr></thead>
-                <tbody>
-                  <tr><td><b>12 位</b></td><td>自适应双精度快速收敛</td><td>确定性 PSLQ 不启动（&lt;14.5 位门槛）；RIES 低位巧合难以被高位复核拦截</td><td>极快（毫秒级），仅建议配合「纯数值模式」预览</td></tr>
-                  <tr><td><b>18 位</b></td><td>中深层高精度求积</td><td>PSLQ 启用但定标深度较浅（≤14 位），复杂线性组合可能漏检；接近 17.5 位强复核边界</td><td>较快，适合常规初等定积分验证</td></tr>
-                  <tr><td><b>25 位（推荐）</b></td><td>默认 25+ 位稳定输出</td><td>满足深定标 PSLQ 与 ≥17.5 位 52 位 Fail-Closed 强复核硬门槛，不易假阳性</td><td>通常数百毫秒，手机与桌面均稳妥</td></tr>
-                  <tr><td><b>35 位</b></td><td>超深层级数与 35+ 位小数</td><td>PSLQ 定标上限升至 34 位，极限校验高系数/高难度常数组合</td><td>手机或分段振荡积分需数秒至十余秒，可点「停止计算」</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <p class="subtle-note"><b>关于关闭「闭式搜索」开关：</b>当您只想求定积分的高精度小数与发散/振荡诊断、不想看猜想方程或「推测概率」时，请关闭此开关进入「纯数值模式」。页面会自动隐藏符号层与闭式候选面板并跳过相关计算。</p>
-          </div>
-        </details>
         <div class="ig-btn-bar">
           <div class="ig-actions">
             <button class="button primary" id="igRun" type="button">计算并求闭式</button>
@@ -345,9 +342,67 @@
             <button class="button" id="igExPlus" type="button">加号例题</button>
             <button class="button" id="igExMinus" type="button">减号（发散）</button>
             <button class="button" id="igExSimple" type="button">高斯积分</button>
+            <button class="button" id="igExLogOsc" type="button">对数振荡 π²</button>
           </div>
         </div>
-        <div id="igStatus" class="notice status-line">就绪。支持 + - * / ^、abs/sin/cos/exp/log/sqrt 等；变量只能写 x。</div>
+        <div class="ig-help-stack">
+          <details class="ig-help ig-syntax-help">
+            <summary>输入法规范与简写教程（免括号规则 · 防歧义边界 · 常用函数与常量）</summary>
+            <div class="ig-help-body">
+              <div class="ig-help-grid">
+                <div class="ig-help-card">
+                  <strong>1. 无歧义“单个整体”可省括号</strong>
+                  <ul>
+                    <li>单变量/常数：<code>sinx</code> → <code>sin(x)</code>，<code>lne</code> → <code>ln(e)</code></li>
+                    <li>复合一元函数：<code>sinsinx</code> → <code>sin(sin(x))</code></li>
+                    <li>幂与负号整体：<code>sin2^x</code> → <code>sin(2^x)</code>，<code>sinx^2</code> → <code>sin(x^2)</code>，<code>exp-x^2</code> → <code>exp(-(x^2))</code></li>
+                    <li>紧邻单项式：<code>sin2x</code> → <code>sin(2*x)</code>，<code>sin2pix</code> → <code>sin(2*pi*x)</code></li>
+                    <li>函数连写相乘：<code>sinxcosx</code> → <code>sin(x)*cos(x)</code>，<code>xsinx</code> → <code>x*sin(x)</code></li>
+                  </ul>
+                </div>
+                <div class="ig-help-card">
+                  <strong>2. 为防歧义必须显式写括号的场景</strong>
+                  <ul>
+                    <li>先算函数再乘方：写 <code>sin(x)^2</code> 或 <code>(sinx)^2</code>；不加括号的 <code>sinx^2</code> 默认作 <code>sin(x^2)</code></li>
+                    <li>含加减号的多项参数：必须写 <code>sqrt(1-x^2)</code>、<code>ln(1+x)</code>（<code>sqrt1-x^2</code> 会拆成 <code>sqrt(1)-x^2</code>）</li>
+                    <li>分母多项连乘：必须写 <code>1/(x*lnx)</code> 或 <code>1/(2x)</code>；<code>1/2x</code> 等价 <code>(1/2)*x</code></li>
+                    <li>对数常量缩写：单独 <code>ln2</code> 表示常数 ln(2)；传 2x 请写 <code>ln2x</code> 或 <code>ln(2x)</code>，相乘写 <code>xln2</code></li>
+                    <li>二元函数 <code>min</code>/<code>max</code>/<code>pow</code>/<code>atan2</code>/<code>hypot</code> 必须带括号与逗号</li>
+                  </ul>
+                </div>
+                <div class="ig-help-card">
+                  <strong>3. 变量、符号、函数与上下限</strong>
+                  <ul>
+                    <li>积分变量只能用 <code>x</code>；禁止变量后紧跟数字（如 <code>x2</code> 请写 <code>x^2</code> 或 <code>2*x</code>）</li>
+                    <li>运算符：<code>+ - * / ^ **</code> 及 Unicode <code>π ∞ − · × ² ³</code></li>
+                    <li>常用一元函数：<code>sin/cos/tan</code>、<code>asin/arcsin</code> 等反三角、<code>sinh/cosh/tanh/asinh/acosh/atanh/arctanh</code>、<code>exp/ln/log/log2/log10/sqrt/cbrt/abs/sign/floor/ceil/round</code></li>
+                    <li>常用常量与上下限：<code>pi</code>(<code>π</code>)、<code>e</code>、<code>tau</code>(2π)、<code>phi</code>(黄金比)、<code>ln2</code>、<code>ln10</code>、<code>inf</code>/<code>-inf</code>(<code>∞</code>)；上下限也支持 <code>pi/2</code>、<code>sqrt2</code>、<code>ln2</code></li>
+                  </ul>
+                </div>
+              </div>
+              <p class="subtle-note">提示：输入框下方会在您输入简写时实时显示<b>「简写解析」</b>预览条（与标准写法一致时自动隐藏），方便提交前一眼确认表达式结构。</p>
+            </div>
+          </details>
+          <details class="ig-help">
+            <summary>精度档位与「闭式搜索」开关使用指南（修改前必读）</summary>
+            <div class="ig-help-body">
+              <p class="subtle-note">自 v2.17 起，数值求积与确定性 PSLQ 运行在后台独立线程（Web Worker），手机与低配电脑也能跑完与桌面一致的深度，不再因卡顿被强行腰斩。</p>
+              <div class="table-wrap">
+                <table class="ig-help-table">
+                  <thead><tr><th>精度档</th><th>数值层表现</th><th>对 PSLQ 与 Fail-Closed 复核的影响</th><th>耗时与适用场景</th></tr></thead>
+                  <tbody>
+                    <tr><td><b>12 位</b></td><td>自适应双精度快速收敛</td><td>确定性 PSLQ 不启动（&lt;14.5 位门槛）；RIES 低位巧合难以被高位复核拦截</td><td>极快（毫秒级），仅建议配合「纯数值模式」预览</td></tr>
+                    <tr><td><b>18 位</b></td><td>中深层高精度求积</td><td>PSLQ 启用但定标深度较浅（≤14 位），复杂线性组合可能漏检；接近 17.5 位强复核边界</td><td>较快，适合常规初等定积分验证</td></tr>
+                    <tr><td><b>25 位（推荐）</b></td><td>默认 25+ 位稳定输出</td><td>满足深定标 PSLQ 与 ≥17.5 位 52 位 Fail-Closed 强复核硬门槛，不易假阳性</td><td>通常数百毫秒，手机与桌面均稳妥</td></tr>
+                    <tr><td><b>35 位</b></td><td>超深层级数与 35+ 位小数</td><td>PSLQ 定标上限升至 34 位，极限校验高系数/高难度常数组合</td><td>手机或分段振荡积分需数秒至十余秒，可点「停止计算」</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="subtle-note"><b>关于关闭「闭式搜索」开关：</b>当您只想求定积分的高精度小数与发散/振荡诊断、不想看猜想方程或「推测概率」时，请关闭此开关进入「纯数值模式」。页面会自动隐藏符号层与闭式候选面板并跳过相关计算。</p>
+            </div>
+          </details>
+        </div>
+        <div id="igStatus" class="notice status-line">就绪。支持 sinx / sinsinx / sin2^x 等简写；变量只能写 x。</div>
         <div id="igSymbolic" class="hp-panel ig-sym" hidden>
           <div><span class="ig-sym-badge">符号解 · 已验证</span></div>
           <div class="ig-sym-eq" id="igSymEq"></div>
@@ -357,7 +412,7 @@
         <div id="igResult" class="hp-panel" hidden><div id="igOut"></div></div>
         <div id="igCandidates" class="results-panel" hidden>
           <h2 class="compact-title">闭式候选</h2>
-          <p class="subtle-note">v2.17 · 候选由高精度确定性 PSLQ 引擎 + 原版 RIES 12.0.2 联合给出；「推测概率」基于 52 位 Fail-Closed 独立复核、积分结构先验与 MDL 最小描述长度净信息压缩计算，不是数学证明。<b>未通过高精度复核者（≥17.5 位时）强制封顶 ≤35%；等价积分/级数变形与高自由度「参数化拟合」均不算闭式</b>，请优先核对「独立复核」列。</p>
+          <p class="subtle-note">v2.19 · 候选由高精度确定性 PSLQ 引擎 + 原版 RIES 12.0.2 联合给出；「推测概率」基于 52 位 Fail-Closed 独立复核、积分结构先验与 MDL 最小描述长度净信息压缩计算，不是数学证明。<b>未通过高精度复核者（≥17.5 位时）强制封顶 ≤35%；等价积分/级数变形与高自由度「参数化拟合」均不算闭式</b>，请优先核对「独立复核」列。</p>
           <div class="table-wrap"><table class="ig-data"><thead><tr><th>候选表达式</th><th>引擎误差</th><th>推测概率</th><th>独立复核</th></tr></thead><tbody id="igCandBody"></tbody></table></div>
         </div>
       </div>
@@ -528,11 +583,11 @@
   </main>
   <script defer src="ries-script.js"></script>
   <script defer src="i18n.js"></script>
-  <script defer src="integral-hp.js?v=2.17"></script>
-  <script defer src="integral-core.js?v=2.17"></script>
-  <script defer src="integral-symbolic.js?v=2.17"></script>
-  <script defer src="integral-pslq.js?v=2.17"></script>
-  <script defer src="integral-glue.js?v=2.17"></script>
+  <script defer src="integral-hp.js?v=2.19"></script>
+  <script defer src="integral-core.js?v=2.19"></script>
+  <script defer src="integral-symbolic.js?v=2.19"></script>
+  <script defer src="integral-pslq.js?v=2.19"></script>
+  <script defer src="integral-glue.js?v=2.19"></script>
   <script>
     /* 内联兜底：外部 .js 全部 404 / 被拦截时（如手机上只打开单个 html、
        或浏览器禁止 file:// 读兄弟资源），defer 脚本不会执行，按钮会静默失效。
@@ -545,7 +600,7 @@
           '并以 http(s) 方式访问；不要只打开单个 integral.html（手机文件管理器的“打开方式”常读不到同目录脚本）。';
         s.className = 'notice status-line bad';
       }
-      ['igRun', 'igExPlus', 'igExMinus', 'igExSimple'].forEach(function (id) {
+      ['igRun', 'igExPlus', 'igExMinus', 'igExSimple', 'igExLogOsc'].forEach(function (id) {
         var b = document.getElementById(id); if (b) b.disabled = true;
       });
     });

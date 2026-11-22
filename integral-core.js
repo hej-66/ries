@@ -29,32 +29,111 @@
     atan2: [Math.atan2, 2], hypot: [Math.hypot, 2]
   };
 
+  var INNER_CONSTS = { pi: 1, e: 1, tau: 1, phi: 1 };
+
+  /* 拆分连写标识符：如 sinx → sin, x；sinsinx → sin, sin, x；sin2 → sin, 2；
+     已知整体（ln2/log2/log10/atan2/pi/sin/cos/x 等）直接保留，变量/常数后紧接数字（如 x2/e2）报错。 */
+  function splitGluedIdent(word, firstWs) {
+    var low = String(word).toLowerCase();
+    if (low === 'x' || Object.prototype.hasOwnProperty.call(CONSTS, low) || Object.prototype.hasOwnProperty.call(FUNCS, low)) {
+      return [{ t: 'id', v: low, ws: !!firstWs }];
+    }
+    var n = low.length;
+    var memo = Object.create(null);
+    function solve(i, canNum) {
+      if (i === n) return { toks: [], cost: 0 };
+      var key = i + ':' + (canNum ? 1 : 0);
+      if (key in memo) return memo[key];
+      var best = null;
+      function accept(cand) {
+        if (!best || cand.cost < best.cost) { best = cand; return; }
+        if (cand.cost === best.cost && cand.toks[0].v.length > best.toks[0].v.length) best = cand;
+      }
+      if (canNum && low[i] >= '0' && low[i] <= '9') {
+        var j = i;
+        while (j < n && low[j] >= '0' && low[j] <= '9') j++;
+        var numRaw = low.slice(i, j);
+        var restN = solve(j, false);
+        if (restN) {
+          accept({ toks: [{ t: 'num', v: parseFloat(numRaw), raw: numRaw, ws: false }].concat(restN.toks), cost: 1 + restN.cost });
+        }
+      }
+      for (var k = n; k > i; k--) {
+        var sub = low.slice(i, k);
+        var spec = Object.prototype.hasOwnProperty.call(FUNCS, sub) ? FUNCS[sub] : null;
+        var isUnary = !!(spec && spec[1] === 1);
+        var isAtom = (sub === 'x' || Object.prototype.hasOwnProperty.call(INNER_CONSTS, sub));
+        if (!isUnary && !isAtom) continue;
+        var rest = solve(k, isUnary);
+        if (rest) {
+          var pc = isUnary ? 1 : (sub === 'x' ? 1 : 1.05);
+          accept({ toks: [{ t: 'id', v: sub, ws: false }].concat(rest.toks), cost: pc + rest.cost });
+        }
+      }
+      memo[key] = best;
+      return best;
+    }
+    var res = solve(0, false);
+    if (!res) {
+      if (/^(?:x|pi|e|tau|phi)\d+$/i.test(low)) {
+        throw new Error('变量或常数「' + word + '」后面不能直接紧跟数字（请用 ^ 或 *，例如 x^2、2*x）');
+      }
+      throw new Error('未知标识符：' + word + '（变量只能用 x）');
+    }
+    res.toks[0].ws = !!firstWs;
+    return res.toks;
+  }
+
   function tokenize(src) {
-    /* 逐字符跳过空白，避免 `x sin(x)` 粘成 `xsin(x)`；支持 Unicode 符号与 ** / ² / ³ */
+    /* 逐字符词法分析：记录空白边界、支持 Unicode 符号与 ** / ² / ³、拆分连写函数名（如 sinx/sinsinx/sin2^x） */
     var out = [], i = 0, s = String(src);
     while (i < s.length) {
+      var hadWs = false;
+      while (i < s.length && /\s/.test(s[i])) { hadWs = true; i++; }
+      if (i >= s.length) break;
       var c = s[i];
-      if (/\s/.test(c)) { i++; continue; }
       if (/[0-9.]/.test(c)) {
         var m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(s.slice(i));
         if (!m) throw new Error('无法解析的数字：' + s.slice(i, i + 12));
-        out.push({ t: 'num', v: parseFloat(m[0]), raw: m[0] }); i += m[0].length; continue;
+        out.push({ t: 'num', v: parseFloat(m[0]), raw: m[0], ws: hadWs }); i += m[0].length; continue;
       }
-      if (c === 'π') { out.push({ t: 'id', v: 'pi' }); i++; continue; }
-      if (c === '∞') { out.push({ t: 'id', v: 'inf' }); i++; continue; }
+      if (c === 'π') { out.push({ t: 'id', v: 'pi', ws: hadWs }); i++; continue; }
+      if (c === '∞') { out.push({ t: 'id', v: 'inf', ws: hadWs }); i++; continue; }
       if (/[a-zA-Z_]/.test(c)) {
         var m2 = /^[a-zA-Z_][a-zA-Z0-9_]*/.exec(s.slice(i));
-        out.push({ t: 'id', v: m2[0].toLowerCase() }); i += m2[0].length; continue;
+        var word = m2[0], wLow = word.toLowerCase();
+        if (!(wLow === 'x' || Object.prototype.hasOwnProperty.call(CONSTS, wLow) || Object.prototype.hasOwnProperty.call(FUNCS, wLow))) {
+          /* 若尾部数字其实是浮点小数或科学记数法（如 sin0.5x / sin1e-2x），把尾部数字退回给数字词法器 */
+          var after = s.slice(i + word.length);
+          var mDec = /^(.*?)(\d+)$/.exec(word);
+          if (mDec && after.length >= 2 && after[0] === '.' && /[0-9]/.test(after[1])) {
+            word = mDec[1];
+          } else {
+            var mSci = /^(.*?)(\d+[eE])$/.exec(word);
+            if (mSci && /^[+-]?\d/.test(after)) {
+              word = mSci[1];
+            } else {
+              var mSciFull = /^([a-zA-Z_]+?)(\d+[eE]\d+.*)$/.exec(word);
+              if (mSciFull && !/^\d/.test(mSciFull[1])) {
+                word = mSciFull[1];
+              }
+            }
+          }
+        }
+        var pieces = splitGluedIdent(word, hadWs);
+        for (var pi = 0; pi < pieces.length; pi++) out.push(pieces[pi]);
+        i += word.length;
+        continue;
       }
-      if (c === '*' && s[i + 1] === '*') { out.push({ t: 'op', v: '^' }); i += 2; continue; }
-      if ('+-*/^'.indexOf(c) >= 0) { out.push({ t: 'op', v: c }); i++; continue; }
-      if (c === '−') { out.push({ t: 'op', v: '-' }); i++; continue; }
-      if (c === '·' || c === '×') { out.push({ t: 'op', v: '*' }); i++; continue; }
-      if (c === '²') { out.push({ t: 'op', v: '^' }, { t: 'num', v: 2, raw: '2' }); i++; continue; }
-      if (c === '³') { out.push({ t: 'op', v: '^' }, { t: 'num', v: 3, raw: '3' }); i++; continue; }
-      if (c === '(') { out.push({ t: 'lp' }); i++; continue; }
-      if (c === ')') { out.push({ t: 'rp' }); i++; continue; }
-      if (c === ',') { out.push({ t: 'comma' }); i++; continue; }
+      if (c === '*' && s[i + 1] === '*') { out.push({ t: 'op', v: '^', ws: hadWs }); i += 2; continue; }
+      if ('+-*/^'.indexOf(c) >= 0) { out.push({ t: 'op', v: c, ws: hadWs }); i++; continue; }
+      if (c === '−') { out.push({ t: 'op', v: '-', ws: hadWs }); i++; continue; }
+      if (c === '·' || c === '×') { out.push({ t: 'op', v: '*', ws: hadWs }); i++; continue; }
+      if (c === '²') { out.push({ t: 'op', v: '^', ws: false }, { t: 'num', v: 2, raw: '2', ws: false }); i++; continue; }
+      if (c === '³') { out.push({ t: 'op', v: '^', ws: false }, { t: 'num', v: 3, raw: '3', ws: false }); i++; continue; }
+      if (c === '(') { out.push({ t: 'lp', ws: hadWs }); i++; continue; }
+      if (c === ')') { out.push({ t: 'rp', ws: hadWs }); i++; continue; }
+      if (c === ',') { out.push({ t: 'comma', ws: hadWs }); i++; continue; }
       throw new Error('非法字符：' + c);
     }
     return out;
@@ -64,41 +143,9 @@
     return Object.prototype.hasOwnProperty.call(FUNCS, name);
   }
 
-  function insertImplicitMul(ts) {
-    var out = [];
-    for (var i = 0; i < ts.length; i++) {
-      var t = ts[i];
-      if (out.length) {
-        var prev = out[out.length - 1];
-        var prevEndsOperand = (prev.t === 'num' || prev.t === 'rp') ||
-          (prev.t === 'id' && !(isFuncName(prev.v) && t.t === 'lp'));
-        var nextStartsOperand = (t.t === 'num' || t.t === 'id' || t.t === 'lp');
-        if (prevEndsOperand && nextStartsOperand) out.push({ t: 'op', v: '*' });
-      }
-      out.push(t);
-    }
-    return out;
-  }
-
-  /* 安全把表达式源码里的自变量 x 替换为子表达式字符串（用于换元回传给高精度层） */
-  function substXSrc(src, repl) {
-    var ts = insertImplicitMul(tokenize(src));
-    var out = [];
-    for (var i = 0; i < ts.length; i++) {
-      var k = ts[i];
-      if (k.t === 'num') out.push(k.raw !== undefined ? k.raw : String(k.v));
-      else if (k.t === 'id') out.push(k.v === 'x' ? '(' + repl + ')' : k.v);
-      else if (k.t === 'op') out.push(k.v);
-      else if (k.t === 'lp') out.push('(');
-      else if (k.t === 'rp') out.push(')');
-      else if (k.t === 'comma') out.push(',');
-    }
-    return out.join('');
-  }
-
   function describeToken(k) {
     if (!k) return '表达式结尾';
-    if (k.t === 'num') return String(k.v);
+    if (k.t === 'num') return k.raw !== undefined ? k.raw : String(k.v);
     if (k.t === 'id') return k.v;
     if (k.t === 'op') return k.v;
     if (k.t === 'lp') return '(';
@@ -107,84 +154,304 @@
     return k.t;
   }
 
-  function compile(src) {
-    var ts = insertImplicitMul(tokenize(src)), pos = 0;
-    function peek() { return ts[pos]; }
+  /* 解析表达式为统一 AST：支持显式括号及无歧义免括号函数自变量（sinx, sinsinx, sin2^x, sin2x 等） */
+  function parseExprAst(src) {
+    var ts = tokenize(src), pos = 0;
+    function peek(off) { return ts[pos + (off || 0)]; }
     function eat(t) {
       var k = ts[pos];
       if (!k || k.t !== t) throw new Error('表达式语法错误：位置 ' + pos + ' 附近是「' + describeToken(k) + '」');
       pos++; return k;
     }
+    function isUnaryFnTok(k) {
+      return !!(k && k.t === 'id' && isFuncName(k.v) && FUNCS[k.v][1] === 1);
+    }
+    function isBinaryFnTok(k) {
+      return !!(k && k.t === 'id' && isFuncName(k.v) && FUNCS[k.v][1] === 2);
+    }
+    function isInnerAtomTok(k) {
+      return !!(k && k.t === 'id' && (k.v === 'x' || Object.prototype.hasOwnProperty.call(INNER_CONSTS, k.v)));
+    }
+    function canStartImplicitFactor(k) {
+      return !!(k && (k.t === 'num' || k.t === 'id' || k.t === 'lp'));
+    }
+
+    function bareArg(fnName) {
+      var k = peek();
+      if (!k) throw new Error('函数 ' + fnName + ' 缺少自变量（可写为 ' + fnName + '(x) 或 ' + fnName + 'x）');
+      if (k.t === 'op' && (k.v === '+' || k.v === '-')) {
+        pos++;
+        var inner = bareArg(fnName);
+        return k.v === '-' ? { k: 'un', op: '-', a: inner } : inner;
+      }
+      if (isUnaryFnTok(k)) {
+        pos++;
+        if (peek() && peek().t === 'lp') {
+          pos++;
+          var args = [];
+          if (!peek() || peek().t !== 'rp') {
+            args.push(expr());
+            while (peek() && peek().t === 'comma') { pos++; args.push(expr()); }
+          }
+          eat('rp');
+          if (args.length !== 1) throw new Error(k.v + ' 需要 1 个参数');
+          var callNode = { k: 'fn', name: k.v, args: args };
+          if (peek() && peek().t === 'op' && peek().v === '^') {
+            pos++;
+            callNode = { k: 'bin', op: '^', l: callNode, r: unary() };
+          }
+          return callNode;
+        }
+        return { k: 'fn', name: k.v, args: [bareArg(k.v)] };
+      }
+      if (k.t === 'lp') {
+        pos++;
+        var sub = expr();
+        eat('rp');
+        if (peek() && peek().t === 'op' && peek().v === '^') {
+          pos++;
+          sub = { k: 'bin', op: '^', l: sub, r: unary() };
+        }
+        return sub;
+      }
+      function bareAtomPow() {
+        var t = peek();
+        var node;
+        if (t && t.t === 'num') {
+          pos++;
+          node = { k: 'num', v: t.v, raw: t.raw };
+        } else if (t && t.t === 'id' && t.v === 'x') {
+          pos++;
+          node = { k: 'var' };
+        } else if (t && t.t === 'id' && Object.prototype.hasOwnProperty.call(CONSTS, t.v)) {
+          pos++;
+          node = { k: 'const', name: t.v, v: CONSTS[t.v] };
+        } else {
+          throw new Error('函数 ' + fnName + ' 缺少有效的整体自变量（位置 ' + pos + ' 附近是「' + describeToken(t) + '」；复杂表达式请加括号如 ' + fnName + '(x+1)）');
+        }
+        if (peek() && peek().t === 'op' && peek().v === '^') {
+          pos++;
+          node = { k: 'bin', op: '^', l: node, r: unary() };
+        }
+        return node;
+      }
+      var first = bareAtomPow();
+      var hadPow = (first.k === 'bin' && first.op === '^');
+      var endedWithVar = (first.k === 'var');
+      if (!hadPow && !endedWithVar) {
+        while (peek() && !peek().ws && isInnerAtomTok(peek())) {
+          var rhs = bareAtomPow();
+          first = { k: 'bin', op: '*', l: first, r: rhs };
+          if (rhs.k === 'var' || (rhs.k === 'bin' && rhs.op === '^')) break;
+        }
+      }
+      return first;
+    }
 
     function primary() {
       var k = peek();
       if (!k) throw new Error('表达式意外结束');
-      if (k.t === 'num') { pos++; var v = k.v; return function () { return v; }; }
+      if (k.t === 'num') { pos++; return { k: 'num', v: k.v, raw: k.raw }; }
       if (k.t === 'lp') { pos++; var e = expr(); eat('rp'); return e; }
       if (k.t === 'op' && (k.v === '+' || k.v === '-')) {
-        pos++; var inner = primary();
-        return k.v === '-' ? function (x) { return -inner(x); } : inner;
+        pos++;
+        var inner = unary();
+        return k.v === '-' ? { k: 'un', op: '-', a: inner } : inner;
       }
       if (k.t === 'id') {
-        pos++; var name = k.v;
+        pos++;
+        var name = k.v;
         if (peek() && peek().t === 'lp') {
           pos++;
           var args = [];
-          if (!peek() || peek().t !== 'rp') { args.push(expr()); while (peek() && peek().t === 'comma') { pos++; args.push(expr()); } }
+          if (!peek() || peek().t !== 'rp') {
+            args.push(expr());
+            while (peek() && peek().t === 'comma') { pos++; args.push(expr()); }
+          }
           eat('rp');
           var spec = FUNCS[name];
           if (!spec) throw new Error('未知函数：' + name);
           if (args.length !== spec[1]) throw new Error(name + ' 需要 ' + spec[1] + ' 个参数');
-          var fn = spec[0];
-          return function (x) { return fn.apply(null, args.map(function (a) { return a(x); })); };
+          return { k: 'fn', name: name, args: args };
         }
-        if (name === 'x') return function (x) { return x; };
+        if (isBinaryFnTok(k)) {
+          throw new Error('二元函数 ' + name + ' 必须带括号和 2 个参数，例如 ' + name + '(x, 0)');
+        }
+        if (isUnaryFnTok(k)) {
+          return { k: 'fn', name: name, args: [bareArg(name)] };
+        }
+        if (name === 'x') return { k: 'var' };
         if (Object.prototype.hasOwnProperty.call(CONSTS, name)) {
-          var cv = CONSTS[name]; return function () { return cv; };
+          return { k: 'const', name: name, v: CONSTS[name] };
         }
         throw new Error('未知标识符：' + name + '（变量只能用 x）');
       }
       throw new Error('表达式语法错误：位置 ' + pos + ' 附近是「' + describeToken(k) + '」');
     }
+
     function power() {
       var base = primary();
       if (peek() && peek().t === 'op' && peek().v === '^') {
-        pos++; var ex = unary();
-        return function (x) { return Math.pow(base(x), ex(x)); };
+        pos++;
+        return { k: 'bin', op: '^', l: base, r: unary() };
       }
       return base;
     }
+
     function unary() {
       var k = peek();
       if (k && k.t === 'op' && (k.v === '+' || k.v === '-')) {
-        pos++; var inner = unary();
-        return k.v === '-' ? function (x) { return -inner(x); } : inner;
+        pos++;
+        var inner = unary();
+        return k.v === '-' ? { k: 'un', op: '-', a: inner } : inner;
       }
       return power();
     }
-    function binop(op, L, R) {
-      if (op === '+') return function (x) { return L(x) + R(x); };
-      if (op === '-') return function (x) { return L(x) - R(x); };
-      if (op === '*') return function (x) { return L(x) * R(x); };
-      return function (x) { return L(x) / R(x); };
-    }
+
     function term() {
       var left = unary();
-      while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
-        left = binop(ts[pos++].v, left, unary());
+      while (peek()) {
+        var k = peek();
+        if (k.t === 'op' && (k.v === '*' || k.v === '/')) {
+          pos++;
+          left = { k: 'bin', op: k.v, l: left, r: unary() };
+        } else if (canStartImplicitFactor(k)) {
+          left = { k: 'bin', op: '*', l: left, r: power() };
+        } else {
+          break;
+        }
       }
       return left;
     }
+
     function expr() {
       var left = term();
       while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
-        left = binop(ts[pos++].v, left, term());
+        var op = ts[pos++].v;
+        left = { k: 'bin', op: op, l: left, r: term() };
       }
       return left;
     }
-    var f = expr();
+
+    var ast = expr();
     if (pos !== ts.length) throw new Error('表达式语法错误：位置 ' + pos + ' 起有多余内容「' + describeToken(ts[pos]) + '」');
-    try { f.src = String(src); } catch (e) {}
+    return ast;
+  }
+
+  /* 将 AST 序列化为唯一显式括号+显式乘号的标准表达式（sinx→sin(x), sin2^x→sin(2^x)） */
+  function formatAst(node) {
+    if (!node) return '';
+    if (node.k === 'num') return node.raw !== undefined ? node.raw : String(node.v);
+    if (node.k === 'var') return 'x';
+    if (node.k === 'const') return node.name;
+    if (node.k === 'fn') return node.name + '(' + node.args.map(formatAst).join(',') + ')';
+    if (node.k === 'un') {
+      var innerS = formatAst(node.a);
+      if (node.op === '-') {
+        if (node.a.k === 'bin' || node.a.k === 'un') return '-(' + innerS + ')';
+        return '-' + innerS;
+      }
+      return innerS;
+    }
+    if (node.k === 'bin') {
+      var ls = formatAst(node.l), rs = formatAst(node.r);
+      if (node.op === '+') return ls + '+' + rs;
+      if (node.op === '-') {
+        if ((node.r.k === 'bin' && (node.r.op === '+' || node.r.op === '-')) || node.r.k === 'un') rs = '(' + rs + ')';
+        return ls + '-' + rs;
+      }
+      if (node.op === '*') {
+        if (node.l.k === 'bin' && (node.l.op === '+' || node.l.op === '-')) ls = '(' + ls + ')';
+        if ((node.r.k === 'bin' && (node.r.op === '+' || node.r.op === '-')) || node.r.k === 'un') rs = '(' + rs + ')';
+        return ls + '*' + rs;
+      }
+      if (node.op === '/') {
+        if (node.l.k === 'bin' && (node.l.op === '+' || node.l.op === '-')) ls = '(' + ls + ')';
+        if (node.r.k === 'bin' || node.r.k === 'un') rs = '(' + rs + ')';
+        return ls + '/' + rs;
+      }
+      if (node.op === '^') {
+        if (node.l.k === 'bin' || node.l.k === 'un') ls = '(' + ls + ')';
+        if (node.r.k === 'bin' || node.r.k === 'un') rs = '(' + rs + ')';
+        return ls + '^' + rs;
+      }
+    }
+    return '';
+  }
+
+  function normalizeExpr(src) {
+    return formatAst(parseExprAst(src));
+  }
+
+  /* 安全把表达式源码里的自变量 x 替换为子表达式字符串（先做标准规范化再按 AST 替换） */
+  function substXSrc(src, repl) {
+    function replaceAst(node) {
+      if (!node) return '';
+      if (node.k === 'var') return '(' + repl + ')';
+      if (node.k === 'num') return node.raw !== undefined ? node.raw : String(node.v);
+      if (node.k === 'const') return node.name;
+      if (node.k === 'fn') return node.name + '(' + node.args.map(replaceAst).join(',') + ')';
+      if (node.k === 'un') {
+        var is = replaceAst(node.a);
+        return node.op === '-' ? ((node.a.k === 'bin' || node.a.k === 'un') ? '-(' + is + ')' : '-' + is) : is;
+      }
+      if (node.k === 'bin') {
+        var ls = replaceAst(node.l), rs = replaceAst(node.r);
+        if (node.op === '+') return ls + '+' + rs;
+        if (node.op === '-') return ls + '-' + (((node.r.k === 'bin' && (node.r.op === '+' || node.r.op === '-')) || node.r.k === 'un') ? '(' + rs + ')' : rs);
+        if (node.op === '*') {
+          if (node.l.k === 'bin' && (node.l.op === '+' || node.l.op === '-')) ls = '(' + ls + ')';
+          if ((node.r.k === 'bin' && (node.r.op === '+' || node.r.op === '-')) || node.r.k === 'un') rs = '(' + rs + ')';
+          return ls + '*' + rs;
+        }
+        if (node.op === '/') {
+          if (node.l.k === 'bin' && (node.l.op === '+' || node.l.op === '-')) ls = '(' + ls + ')';
+          if (node.r.k === 'bin' || node.r.k === 'un') rs = '(' + rs + ')';
+          return ls + '/' + rs;
+        }
+        if (node.op === '^') {
+          if (node.l.k === 'bin' || node.l.k === 'un') ls = '(' + ls + ')';
+          if (node.r.k === 'bin' || node.r.k === 'un') rs = '(' + rs + ')';
+          return ls + '^' + rs;
+        }
+      }
+      return '';
+    }
+    return replaceAst(parseExprAst(src));
+  }
+
+  function compileAstNode(node) {
+    if (node.k === 'num') { var v = node.v; return function () { return v; }; }
+    if (node.k === 'var') return function (x) { return x; };
+    if (node.k === 'const') { var cv = node.v; return function () { return cv; }; }
+    if (node.k === 'un') {
+      var a = compileAstNode(node.a);
+      return node.op === '-' ? function (x) { return -a(x); } : a;
+    }
+    if (node.k === 'fn') {
+      var spec = FUNCS[node.name], fn = spec[0];
+      if (node.args.length === 1) {
+        var a0 = compileAstNode(node.args[0]);
+        return function (x) { return fn(a0(x)); };
+      }
+      var cArgs = node.args.map(compileAstNode);
+      return function (x) { return fn.apply(null, cArgs.map(function (c) { return c(x); })); };
+    }
+    if (node.k === 'bin') {
+      var L = compileAstNode(node.l), R = compileAstNode(node.r);
+      if (node.op === '+') return function (x) { return L(x) + R(x); };
+      if (node.op === '-') return function (x) { return L(x) - R(x); };
+      if (node.op === '*') return function (x) { return L(x) * R(x); };
+      if (node.op === '/') return function (x) { return L(x) / R(x); };
+      return function (x) { return Math.pow(L(x), R(x)); };
+    }
+    throw new Error('未知 AST 节点');
+  }
+
+  function compile(src) {
+    var ast = parseExprAst(src);
+    var f = compileAstNode(ast);
+    try { f.src = formatAst(ast); } catch (e) {}
     return f;
   }
 
@@ -532,7 +799,9 @@
       return { slope: 0, divergent: false, integrableSingularity: false, oscillatoryTail: false, benignOverflow: false, domainBad: true };
     }
 
-    /* D3 溢出发散检查 */
+    /* D3 溢出发散检查（区分实为 float64 相消下溢壁：如 ln(1-sin x) 在 π/2 处） */
+    var isCancelWall = false;
+    var lastFinVEdge = pts.length ? pts[pts.length - 1].abs : 0;
     if (tailNonFin >= 4 || (pts.length < 6 && samples.length > 0 && !isFinite(samples[samples.length - 1].v))) {
       var lastFinIdx = -1;
       for (var lf = samples.length - 1; lf >= 0; lf--) {
@@ -553,11 +822,21 @@
       if (Math.abs(vEdge) <= 1e-10 * Math.max(peak, 1e-300)) {
         return { slope: 0, divergent: false, integrableSingularity: false, oscillatoryTail: oscillatoryTail, benignOverflow: true, domainBad: false };
       }
-      if (oscillatoryTail && Math.abs(vEdge) < 1e200) {
-        /* 如 sin(2^x) 在 x>=1024 因 2^x 溢出变 NaN，但 f 本身幅值有界（仅雅可比放大），交由振荡分支检验 */
-        return { slope: -1.5, divergent: false, integrableSingularity: false, oscillatoryTail: true, benignOverflow: false, domainBad: false };
+      var tailAllInf = tailNonFin > 0;
+      for (var ti = lastFinIdx + 1; ti < samples.length; ti++) {
+        if (samples[ti].v !== Infinity && samples[ti].v !== -Infinity) { tailAllInf = false; break; }
       }
-      return { slope: -1.5, divergent: true, reason: 'overflow', integrableSingularity: false, oscillatoryTail: oscillatoryTail, benignOverflow: false, domainBad: false };
+      if (tailAllInf && Math.abs(vEdge) < 1e100 && pts.length >= 10 && dBad <= 1e-4 * W) {
+        isCancelWall = true;
+        lastFinVEdge = Math.abs(vEdge);
+        pts = pts.slice(0, pts.length - 2);
+      } else {
+        if (oscillatoryTail && Math.abs(vEdge) < 1e200) {
+          /* 如 sin(2^x) 在 x>=1024 因 2^x 溢出变 NaN，但 f 本身幅值有界（仅雅可比放大），交由振荡分支检验 */
+          return { slope: -1.5, divergent: false, integrableSingularity: false, oscillatoryTail: true, benignOverflow: false, domainBad: false };
+        }
+        return { slope: -1.5, divergent: true, reason: 'overflow', integrableSingularity: false, oscillatoryTail: oscillatoryTail, benignOverflow: false, domainBad: false };
+      }
     }
 
     if (pts.length < 6) {
@@ -607,7 +886,7 @@
       slopeAll: slopeAll,
       useSlope: useSlope,
       divergent: false,
-      integrableSingularity: useSlope < -0.08,
+      integrableSingularity: useSlope < -0.08 || (isCancelWall && lastFinVEdge > Math.max(pts[0].abs * 1.5, 1)),
       oscillatoryTail: false,
       benignOverflow: false,
       domainBad: false
@@ -687,6 +966,16 @@
       var v1 = safeEval(g, m1), v2 = safeEval(g, m2);
       var s1 = isFinite(v1) ? Math.abs(v1) : Infinity;
       var s2 = isFinite(v2) ? Math.abs(v2) : Infinity;
+      if (s1 === Infinity && s2 === Infinity) {
+        var lLo = a, lHi = m1, rLo = m2, rHi = b;
+        for (var bi = 0; bi < 30; bi++) {
+          var lm = (lLo + lHi) / 2;
+          if (!isFinite(safeEval(g, lm))) lHi = lm; else lLo = lm;
+          var rm = (rLo + rHi) / 2;
+          if (!isFinite(safeEval(g, rm))) rLo = rm; else rHi = rm;
+        }
+        return (lHi + rLo) / 2;
+      }
       if (s1 > s2) b = m2;
       else a = m1;
     }
@@ -729,71 +1018,12 @@
   function extractAstSeeds(src, a, b) {
     if (!src) return [];
     try {
-      var ts = insertImplicitMul(tokenize(src)), pos = 0;
-      function peek() { return ts[pos]; }
-      function parseExprAST() {
-        var left = parseTermAST();
-        while (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
-          var op = ts[pos++].v;
-          left = { k: 'bin', op: op, l: left, r: parseTermAST() };
-        }
-        return left;
-      }
-      function parseTermAST() {
-        var left = parseUnaryAST();
-        while (peek() && peek().t === 'op' && (peek().v === '*' || peek().v === '/')) {
-          var op = ts[pos++].v;
-          left = { k: 'bin', op: op, l: left, r: parseUnaryAST() };
-        }
-        return left;
-      }
-      function parseUnaryAST() {
-        if (peek() && peek().t === 'op' && (peek().v === '+' || peek().v === '-')) {
-          return { k: 'un', op: ts[pos++].v, a: parseUnaryAST() };
-        }
-        return parsePowAST();
-      }
-      function parsePowAST() {
-        var base = parsePrimAST();
-        if (peek() && peek().t === 'op' && peek().v === '^') {
-          pos++;
-          return { k: 'bin', op: '^', l: base, r: parseUnaryAST() };
-        }
-        return base;
-      }
-      function parsePrimAST() {
-        var k = peek();
-        if (!k) throw new Error('eof');
-        if (k.t === 'num') { pos++; return { k: 'num', v: k.v }; }
-        if (k.t === 'id') {
-          pos++;
-          if (k.v === 'x') return { k: 'var' };
-          if (peek() && peek().t === 'lp') {
-            pos++;
-            var args = [];
-            if (!peek() || peek().t !== 'rp') {
-              args.push(parseExprAST());
-              while (peek() && peek().t === 'comma') { pos++; args.push(parseExprAST()); }
-            }
-            if (peek() && peek().t === 'rp') pos++;
-            return { k: 'fn', name: k.v, args: args };
-          }
-          if (Object.prototype.hasOwnProperty.call(CONSTS, k.v)) return { k: 'num', v: CONSTS[k.v] };
-          return { k: 'other' };
-        }
-        if (k.t === 'lp') {
-          pos++;
-          var inner = parseExprAST();
-          if (peek() && peek().t === 'rp') pos++;
-          return inner;
-        }
-        return { k: 'other' };
-      }
-      var ast = parseExprAST();
+      var ast = parseExprAst(src);
 
       function poly2(node) {
         if (!node) return null;
         if (node.k === 'num') return isFinite(node.v) ? { c0: node.v, c1: 0, c2: 0 } : null;
+        if (node.k === 'const') return isFinite(node.v) ? { c0: node.v, c1: 0, c2: 0 } : null;
         if (node.k === 'var') return { c0: 0, c1: 1, c2: 0 };
         if (node.k === 'un') {
           var p = poly2(node.a);
@@ -988,6 +1218,9 @@
       seenT.push(tStar);
 
       var spanSide = Math.min(0.1 * W, Math.max(tStar - lo, 0) * 0.5, Math.max(hi - tStar, 0) * 0.5);
+      if (!isFiniteInterval && cd.tR > cd.tL) {
+        spanSide = Math.min(spanSide, Math.max(6 * (cd.tR - cd.tL), 1e-4 * W));
+      }
       if (spanSide <= 1e-11 * W) continue;
       var leftA = analyzeEndpoint(g, tStar - spanSide, tStar, 'hi', true);
       var rightA = analyzeEndpoint(g, tStar, tStar + spanSide, 'lo', true);
@@ -1178,7 +1411,7 @@
     var b = typeof bRaw === 'number' ? bRaw : parseBound(bRaw);
     if (!(b > a)) return false;
     var tr = transform(f, a, b);
-    var d = diagnose(tr.g, tr.lo, tr.hi);
+    var d = diagnose(tr.g, tr.lo, tr.hi, isFinite(a), isFinite(b));
     if (d.verdict === 'divergent') return true;
     var trim = trimOverflowTail(tr.g, tr.lo, tr.hi, d.maxSeen, d.endLo.benignOverflow, d.endHi.benignOverflow);
     if (trim) { tr.lo = trim.lo; tr.hi = trim.hi; }
@@ -1284,7 +1517,15 @@
     return wynnEpsDiag(s).value;
   }
 
-  /* ---------- 通用双精度振荡积分（支持 [a, ∞) 与 (−∞, b]） ---------- */
+  function isRaySingDivergent(gRay, zR, leftLim, rightLim) {
+    var sp = Math.min(0.25, Math.max(zR - leftLim, 0) * 0.45, Math.max(rightLim - zR, 0) * 0.45);
+    if (!(sp > 1e-10)) return false;
+    var lA = analyzeEndpoint(gRay, zR - sp, zR, 'hi', true);
+    var rA = analyzeEndpoint(gRay, zR, zR + sp, 'lo', true);
+    return !!(lA.divergent || rA.divergent);
+  }
+
+  /* ---------- 通用双精度振荡积分（支持 [a, ∞) 与 (−∞, b]；含周期内部可积奇点探测与发散极点守卫） ---------- */
   function oscillatory(f, a, b, opt) {
     var dir, anchor;
     if (isFinite(a) && b === Infinity) { dir = 1; anchor = a; }
@@ -1305,12 +1546,44 @@
       if (!isFinite(fr)) return null;
     }
 
-    var rZeros = [], h = 0.02, guard = 0, hitInfinity = false, stepsSinceZero = 0;
+    var rZeros = [], singHints = [], h = 0.02, guard = 0, hitInfinity = false, stepsSinceZero = 0;
     while (guard++ < 400000 && rZeros.length < maxPanels) {
       if (r > 1e9) break;
       var r1 = r + h, f1 = safeEval(gRay, r1); evals++;
       if (!isFinite(f1)) {
         if (r1 > 1e6) { hitInfinity = true; break; }
+        /* 尝试跳过孤立可积/发散奇点，避免在 π/2+kπ 一类奇点处因连续踩到 ∞ 而卡死 */
+        var rJump = r1 + Math.max(h * 0.37, 1e-4);
+        var fJump = safeEval(gRay, rJump); evals++;
+        if (!isFinite(fJump)) {
+          rJump = r1 + Math.max(h * 0.83, 1e-3);
+          fJump = safeEval(gRay, rJump); evals++;
+        }
+        if (isFinite(fJump)) {
+          if (singHints.length < 64) singHints.push(r1);
+          if (fr * fJump < 0) {
+            var lp = r, rp = rJump, flp = fr;
+            for (var itp = 0; itp < 50; itp++) {
+              var mp = (lp + rp) / 2, fmp = safeEval(gRay, mp); evals++;
+              if (!isFinite(fmp)) { lp = rp = mp; break; }
+              if (flp * fmp <= 0) rp = mp; else { lp = mp; flp = fmp; }
+              if (rp - lp <= 1e-13 * (1 + Math.abs(lp))) break;
+            }
+            var zP = (lp + rp) / 2;
+            var epsP = Math.max(1e-7 * (1 + Math.abs(zP)), (rp - lp) * 2);
+            var fPL = safeEval(gRay, zP - epsP), fPR = safeEval(gRay, zP + epsP); evals += 2;
+            if (!isFinite(fPL) || !isFinite(fPR) ||
+                Math.min(Math.abs(fPL), Math.abs(fPR)) > 15 * Math.max(Math.abs(fr), Math.abs(fJump), 1e-12)) {
+              if (isRaySingDivergent(gRay, zP, Math.max(0, r - h), rJump + h)) {
+                return { divergent: true, atX: anchor + dir * zP, evals: evals };
+              }
+            } else {
+              rZeros.push(zP);
+            }
+          }
+          r = rJump; fr = fJump; stepsSinceZero++;
+          continue;
+        }
         h /= 2;
         if (h < 1e-12) break;
         continue;
@@ -1339,6 +1612,18 @@
           if (hi2 - lo <= 1e-14 * (1 + Math.abs(lo))) break;
         }
         var z = (lo + hi2) / 2;
+        var epsZ = Math.max(1e-7 * (1 + Math.abs(z)), (hi2 - lo) * 2);
+        var fzL = safeEval(gRay, z - epsZ), fzR = safeEval(gRay, z + epsZ); evals += 2;
+        if (!isFinite(fzL) || !isFinite(fzR) ||
+            Math.min(Math.abs(fzL), Math.abs(fzR)) > 15 * Math.max(Math.abs(fr), Math.abs(f1), 1e-12)) {
+          /* 实为变号极点（如 tan(x)/x 在 π/2 处），非真正过零点 */
+          if (isRaySingDivergent(gRay, z, Math.max(0, r - h), r1 + h)) {
+            return { divergent: true, atX: anchor + dir * z, evals: evals };
+          }
+          if (singHints.length < 64) singHints.push(z);
+          r = r1; fr = f1; stepsSinceZero++;
+          continue;
+        }
         rZeros.push(z);
         if (rZeros.length >= 2) {
           h = Math.max((z - rZeros[rZeros.length - 2]) * 0.22, 1e-9);
@@ -1360,34 +1645,152 @@
     }
     if (rZeros.length < 10) return null;
 
-    /* 首段 [0, z_0] 用自适应 Simpson（若 0 端有可积奇点自动拉伸） */
-    var initSeg = 0;
-    if (rZeros[0] > 0) {
-      var trInit = transform(gRay, 0, rZeros[0]);
-      var gInit = patchEnds(trInit.g, trInit.lo, trInit.hi);
-      var end0 = analyzeEndpoint(gInit, trInit.lo, trInit.hi, 'lo');
-      if (end0.divergent) return null;
-      if (end0.slope < -0.08) {
-        var m0 = Math.min(12, Math.max(4, Math.ceil(1 / Math.max(0.05, 1 + end0.slope))));
-        gInit = stretchEnds(gInit, trInit.lo, trInit.hi, m0, 1);
+    function scanPanelSings(u, v) {
+      var trP = transform(gRay, u, v);
+      var scP = scanInterior(gRay, trP, true, false, false);
+      if (scP.divergent) return { divergent: true, atR: scP.atX, sings: [] };
+      var sings = [];
+      for (var si = 0; si < scP.splits.length; si++) {
+        if (scP.splits[si].kind === 'singularity' && scP.splits[si].x > u && scP.splits[si].x < v) {
+          sings.push(scP.splits[si].x);
+        }
       }
-      var resInit = integrateOnce(gInit, 0, 1, 1e-12, 16);
-      evals += resInit.evals;
-      if (resInit.bad || !isFinite(resInit.value)) return null;
-      initSeg = resInit.value;
+      sings.sort(function (x, y) { return x - y; });
+      return { divergent: false, sings: sings };
     }
 
-    /* 真正的半周期面板 [z_k, z_{k+1}] 逐片自适应求积（1e-11 容差避免触底双精度舍入噪声） */
-    var panels = [], sums = [], acc = 0;
-    var nPan = Math.min(rZeros.length - 1, 120);
-    for (var i2 = 0; i2 < nPan; i2++) {
-      var trP = transform(gRay, rZeros[i2], rZeros[i2 + 1]);
-      var resP = integrateOnce(trP.g, 0, 1, 1e-11, 4, 14, 20000);
-      evals += resP.evals;
-      if (!isFinite(resP.value)) break;
-      panels.push(resP.value);
-      acc += resP.value;
-      sums.push(acc);
+    function integratePanelWithSplits(u, v, sings, tol) {
+      var pts = [u];
+      for (var si = 0; si < sings.length; si++) {
+        if (sings[si] > pts[pts.length - 1] + 1e-12 * Math.max(1, v - u) && sings[si] < v - 1e-12 * Math.max(1, v - u)) {
+          pts.push(sings[si]);
+        }
+      }
+      pts.push(v);
+      var sumV = 0, subEvals = 0;
+      for (var pi = 0; pi + 1 < pts.length; pi++) {
+        var pA = pts[pi], pB = pts[pi + 1];
+        var isSingLo = pi > 0, isSingHi = (pi + 1 < pts.length - 1);
+        var trS = transform(gRay, pA, pB);
+        var gS = patchEnds(trS.g, 0, 1);
+        var eL = analyzeEndpoint(gS, 0, 1, 'lo', true);
+        var eR = analyzeEndpoint(gS, 0, 1, 'hi', true);
+        if (eL.divergent || eR.divergent) {
+          return { divergent: true, atR: eL.divergent ? pA : pB, evals: subEvals };
+        }
+        var mLo = 1, mHi = 1;
+        if (isSingLo || eL.integrableSingularity) {
+          mLo = Math.min(12, Math.max(2, Math.ceil(1 / Math.max(0.05, 1 + Math.min(eL.slope, -0.05)))));
+        }
+        if (isSingHi || eR.integrableSingularity) {
+          mHi = Math.min(12, Math.max(2, Math.ceil(1 / Math.max(0.05, 1 + Math.min(eR.slope, -0.05)))));
+        }
+        if (mLo > 1 || mHi > 1) {
+          gS = stretchEnds(gS, 0, 1, mLo, mHi, pA, pB);
+          var glLo = compositeGL16(gS, 0, 1, 6);
+          var glHi = compositeGL16(gS, 0, 1, 12);
+          subEvals += glLo.evals + glHi.evals;
+          if (!glHi.bad && isFinite(glHi.value)) {
+            sumV += glHi.value;
+            continue;
+          }
+        }
+        var resS = integrateOnce(gS, 0, 1, tol, 8, 16, 40000);
+        subEvals += resS.evals;
+        if (resS.bad || !isFinite(resS.value)) return { value: NaN, evals: subEvals };
+        sumV += resS.value;
+      }
+      return { value: sumV, evals: subEvals };
+    }
+
+    var initScan = rZeros[0] > 0 ? scanPanelSings(0, rZeros[0]) : { divergent: false, sings: [] };
+    if (initScan.divergent) return { divergent: true, atX: anchor + dir * initScan.atR, evals: evals };
+    var p0Scan = scanPanelSings(rZeros[0], rZeros[1]);
+    if (p0Scan.divergent) return { divergent: true, atX: anchor + dir * p0Scan.atR, evals: evals };
+    var p1Scan = rZeros.length >= 3 ? scanPanelSings(rZeros[1], rZeros[2]) : { divergent: false, sings: [] };
+    if (p1Scan.divergent) return { divergent: true, atX: anchor + dir * p1Scan.atR, evals: evals };
+
+    var hasPanelSings = (initScan.sings.length > 0 || p0Scan.sings.length > 0 || p1Scan.sings.length > 0 || singHints.length > 0);
+    var initSeg = 0, panels = [], sums = [], acc = 0, panelSingsList = null;
+
+    if (hasPanelSings) {
+      if (rZeros[0] > 0) {
+        var rInitSp = integratePanelWithSplits(0, rZeros[0], initScan.sings, 1e-11);
+        evals += rInitSp.evals;
+        if (rInitSp.divergent) return { divergent: true, atX: anchor + dir * rInitSp.atR, evals: evals };
+        if (!isFinite(rInitSp.value)) return null;
+        initSeg = rInitSp.value;
+      }
+      var fracsEven = p0Scan.sings.map(function (s) { return (s - rZeros[0]) / (rZeros[1] - rZeros[0]); });
+      var fracsOdd = (rZeros.length >= 3 ? p1Scan.sings.map(function (s) { return (s - rZeros[1]) / (rZeros[2] - rZeros[1]); }) : fracsEven);
+      panelSingsList = [];
+      var nPanS = Math.min(rZeros.length - 1, 64);
+      for (var iS = 0; iS < nPanS; iS++) {
+        var aP = rZeros[iS], bP = rZeros[iS + 1], span2 = bP - aP;
+        var sList;
+        if (iS === 0) sList = p0Scan.sings.slice();
+        else if (iS === 1) sList = p1Scan.sings.slice();
+        else {
+          var fracs = (iS % 2 === 0) ? fracsEven : fracsOdd;
+          sList = [];
+          for (var fi2 = 0; fi2 < fracs.length; fi2++) {
+            var sPred = aP + fracs[fi2] * span2;
+            var loPred = Math.max(aP + 1e-9 * span2, sPred - 0.08 * span2);
+            var hiPred = Math.min(bP - 1e-9 * span2, sPred + 0.08 * span2);
+            if (!(hiPred > loPred)) continue;
+            var sRef = refinePoleOrPeak(gRay, loPred, hiPred, false);
+            if (sRef !== null && sRef > aP + 1e-9 * span2 && sRef < bP - 1e-9 * span2) {
+              var vRef = safeEval(gRay, sRef);
+              var vRefL = safeEval(gRay, Math.max(aP + 1e-9 * span2, sRef - 0.03 * span2));
+              var vRefR = safeEval(gRay, Math.min(bP - 1e-9 * span2, sRef + 0.03 * span2));
+              if (!isFinite(vRef) || (isFinite(vRefL) && isFinite(vRefR) && Math.abs(vRef) > 4 * Math.max(Math.abs(vRefL), Math.abs(vRefR), 1e-300))) {
+                sList.push(sRef);
+              }
+            }
+          }
+          if (!sList.length && fracs.length) {
+            var scFb = scanPanelSings(aP, bP);
+            if (scFb.divergent) return { divergent: true, atX: anchor + dir * scFb.atR, evals: evals };
+            sList = scFb.sings;
+          }
+        }
+        panelSingsList.push(sList);
+        var resPS = integratePanelWithSplits(aP, bP, sList, 1e-10);
+        evals += resPS.evals;
+        if (resPS.divergent) return { divergent: true, atX: anchor + dir * resPS.atR, evals: evals };
+        if (!isFinite(resPS.value)) break;
+        panels.push(resPS.value);
+        acc += resPS.value;
+        sums.push(acc);
+      }
+    } else {
+      /* 首段 [0, z_0] 用自适应 Simpson（若 0 端有可积奇点自动拉伸） */
+      if (rZeros[0] > 0) {
+        var trInit = transform(gRay, 0, rZeros[0]);
+        var gInit = patchEnds(trInit.g, trInit.lo, trInit.hi);
+        var end0 = analyzeEndpoint(gInit, trInit.lo, trInit.hi, 'lo', true);
+        if (end0.divergent) return null;
+        if (end0.slope < -0.08) {
+          var m0 = Math.min(12, Math.max(4, Math.ceil(1 / Math.max(0.05, 1 + end0.slope))));
+          gInit = stretchEnds(gInit, trInit.lo, trInit.hi, m0, 1);
+        }
+        var resInit = integrateOnce(gInit, 0, 1, 1e-12, 16);
+        evals += resInit.evals;
+        if (resInit.bad || !isFinite(resInit.value)) return null;
+        initSeg = resInit.value;
+      }
+
+      /* 真正的半周期面板 [z_k, z_{k+1}] 逐片自适应求积（1e-11 容差避免触底双精度舍入噪声） */
+      var nPan = Math.min(rZeros.length - 1, 120);
+      for (var i2 = 0; i2 < nPan; i2++) {
+        var trP = transform(gRay, rZeros[i2], rZeros[i2 + 1]);
+        var resP = integrateOnce(trP.g, 0, 1, 1e-11, 4, 14, 20000);
+        evals += resP.evals;
+        if (!isFinite(resP.value)) break;
+        panels.push(resP.value);
+        acc += resP.value;
+        sums.push(acc);
+      }
     }
     if (sums.length < 8) return null;
 
@@ -1417,7 +1820,8 @@
       consistent: gap <= 1e-7 * scale,
       gap: gap,
       hitInfinity: hitInfinity,
-      zeros: rZeros.map(function (z) { return anchor + dir * z; })
+      zeros: rZeros.map(function (z) { return anchor + dir * z; }),
+      panelSings: hasPanelSings ? { init: initScan.sings, panels: panelSingsList } : null
     };
   }
 
@@ -1954,13 +2358,30 @@
         };
       }
 
-      /* 半无穷区间交替振荡：双精度零交叉 + 对角 Wynn，随后尝试 Decimal 通用高精度加速（含配对周期 Levin-u） */
+      /* 半无穷区间交替振荡：双精度零交叉 + 对角 Wynn，随后尝试 Decimal 通用高精度加速（含周期奇点拆分 / 配对周期 Levin-u） */
       var osc = oscillatory(f, a, b, opt);
+      if (osc && osc.divergent) {
+        notes.push('振荡区间内部分点 x ≈ ' + Number(osc.atX).toFixed(7) + ' 处检测到不可积奇点，判定为发散积分。');
+        return {
+          value: 0, sigma: Infinity, digits: 0, a: a, b: b, verdict: 'divergent',
+          notes: notes, slopes: { lo: diag.slopeLo, hi: diag.slopeHi },
+          evals: osc.evals || 0, transformLabel: tr.label, segments: 0,
+          method: '振荡区间内部奇点判定（发散）', signChanges: diag.signChanges,
+          errorType: '不适用'
+        };
+      }
       if (osc && isFinite(osc.value)) {
         var oscNotes = notes.filter(function (n) { return n.indexOf('发散') < 0; });
-        if (ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integrateOscGeneral && f.src && osc.zeros && osc.zeros.length >= 48) {
+        var minZerosHp = osc.panelSings ? (reqDigits <= 14 ? 24 : reqDigits <= 20 ? 32 : 42) : 48;
+        if (ROOT && ROOT.IntegralHP && ROOT.IntegralHP.integrateOscGeneral && f.src && osc.zeros && osc.zeros.length >= minZerosHp) {
           var ghp = null;
-          try { ghp = ROOT.IntegralHP.integrateOscGeneral(f, aRaw, bRaw, osc.zeros, { digits: Math.min(reqDigits, 25), maxMs: 20000 }); }
+          try {
+            ghp = ROOT.IntegralHP.integrateOscGeneral(f, aRaw, bRaw, osc.zeros, {
+              digits: osc.panelSings ? Math.min(reqDigits, 35) : Math.min(reqDigits, 25),
+              maxMs: 25000,
+              panelSings: osc.panelSings
+            });
+          }
           catch (e) { ghp = null; }
           if (ghp && ghp.consistent && isFinite(ghp.value)) {
             var gGap = Math.abs(ghp.value - osc.value);
@@ -2638,6 +3059,7 @@
 
   var API = {
     compile: compile, parseBound: parseBound, integrate: integrate,
+    normalizeExpr: normalizeExpr,
     transform: transform, diagnose: diagnose, formatValue: formatValue,
     wynnEps: wynnEps, oscillatory: oscillatory,
     analyzeEndpoint: analyzeEndpoint, hasInteriorDivergence: hasInteriorDivergence

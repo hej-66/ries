@@ -455,6 +455,153 @@ check(HP && HP.available, 'IntegralHP must be available for Pillar 4');
   check(dedupOk, `Expected 5 duplicate RIES rows to collapse into 1, got ${rankedDup.rows.length}`);
 }
 
+// 4.5 内部可积对数/根式奇点 + 二次相消下溢壁 + 周期振荡无穷尾及真发散守卫（v2.18）
+console.log('\n  -- 4.5 二次相消奇点与振荡内部奇点族（正例 + 真发散守卫） --');
+{
+  const LEMNISCATE = GAMMA14.pow(2).div(PI.mul(2).sqrt().mul(2));
+  const singOscPslq = [
+    { name: 'ln(((1+sin)/(1-sin))^2)/x [0,inf)', fn: 'ln(((1+sin(x))/(1-sin(x)))^2)/x', a: '0', b: 'inf', ref: PI.pow(2), minTrue: 25, minRep: 23, checkIntDiv: true },
+    { name: 'ln((1+sin)/(1-sin))/x [0,inf)', fn: 'ln((1+sin(x))/(1-sin(x)))/x', a: '0', b: 'inf', ref: PI.pow(2).div(2), minTrue: 25, minRep: 23, checkIntDiv: true },
+    { name: 'ln|tan(x/2+pi/4)|/x [0,inf)', fn: 'ln(abs(tan(x/2+pi/4)))/x', a: '0', b: 'inf', ref: PI.pow(2).div(4), minTrue: 25, minRep: 23, checkIntDiv: false },
+    { name: 'sin(x)/(x*sqrt|cos x|) [0,inf)', fn: 'sin(x)/(x*sqrt(abs(cos(x))))', a: '0', b: 'inf', ref: LEMNISCATE, minTrue: 24, minRep: 22, checkIntDiv: false }
+  ];
+  for (const sc of singOscPslq) {
+    const f = C.compile(sc.fn);
+    const r = C.integrate(f, sc.a, sc.b, { targetDigits: 25 });
+    const err = new D(r.valueText || String(r.value)).minus(sc.ref).abs();
+    const trueDig = err.isZero() ? 45 : -err.div(sc.ref).ln().div(new D(10).ln()).toNumber();
+    const intDivOk = !sc.checkIntDiv || C.hasInteriorDivergence(f, sc.a, sc.b) === false;
+    r.profile = glue.analyzeIntegralProfile(sc.fn, sc.a, sc.b, r.slopes);
+    const hits = PSLQ.search(r);
+    const ranked = glue.rankCandidates(hits, r);
+    const top = ranked.rows[0];
+    const pslqOk = !!(ranked.hasReliableClosed && top && top.p >= 0.95 && top.hpCheck && top.hpCheck.status === 'passed');
+    const ok = r.verdict === 'ok' && trueDig >= sc.minTrue && r.digits >= sc.minRep && intDivOk && pslqOk;
+    console.log(`  [${ok ? 'PASS' : 'FAIL'}] ${sc.name}: dig=${r.digits.toFixed(1)}, true=${trueDig.toFixed(1)}, intDivOk=${intDivOk}, pslq=${top ? top.formula : 'none'}`);
+    check(ok, `4.5 failed on ${sc.name}: verdict=${r.verdict}, true=${trueDig}, dig=${r.digits}, intDivOk=${intDivOk}, pslqOk=${pslqOk}`);
+  }
+
+  // 双无穷对称 & 有限区间相消壁可积用例
+  {
+    const fSym = C.compile('ln(((1+sin(x))/(1-sin(x)))^2)/x');
+    const rSym = C.integrate(fSym, '-inf', 'inf', { targetDigits: 25 });
+    const refSym = PI.pow(2).mul(2);
+    const errSym = new D(rSym.valueText || String(rSym.value)).minus(refSym).abs();
+    const trueSym = errSym.isZero() ? 45 : -errSym.div(refSym).ln().div(new D(10).ln()).toNumber();
+    const symOk = rSym.verdict === 'ok' && trueSym >= 25 && rSym.digits >= 23;
+    console.log(`  [${symOk ? 'PASS' : 'FAIL'}] ln(((1+sin)/(1-sin))^2)/x (-inf,inf): dig=${rSym.digits.toFixed(1)}, true=${trueSym.toFixed(1)}`);
+    check(symOk, `4.5 (-inf,inf) symmetric case failed (true=${trueSym}, dig=${rSym.digits})`);
+
+    const rPi = C.integrate(fSym, '0', 'pi', { targetDigits: 25 });
+    const okPi = rPi.verdict === 'ok' && rPi.digits >= 24 && C.hasInteriorDivergence(fSym, '0', 'pi') === false;
+    console.log(`  [${okPi ? 'PASS' : 'FAIL'}] ln(((1+sin)/(1-sin))^2)/x [0,pi]: verdict=${rPi.verdict}, dig=${rPi.digits.toFixed(1)}`);
+    check(okPi, '4.5 finite [0,pi] failed');
+
+    const fCos = C.compile('ln(1-cos(x))');
+    const rCos = C.integrate(fCos, '0', '1', { targetDigits: 25 });
+    const okCos = rCos.verdict === 'ok' && rCos.digits >= 24;
+    console.log(`  [${okCos ? 'PASS' : 'FAIL'}] ln(1-cos(x)) [0,1]: verdict=${rCos.verdict}, dig=${rCos.digits.toFixed(1)}`);
+    check(okCos, '4.5 ln(1-cos(x)) [0,1] failed');
+
+    const fSin = C.compile('ln(1-sin(x))');
+    const rSin = C.integrate(fSin, '0', 'pi', { targetDigits: 25 });
+    const refSin = PI.mul(LN2).plus(G_CAT.mul(4)).neg();
+    const errSin = new D(rSin.valueText || String(rSin.value)).minus(refSin).abs();
+    const trueSin = errSin.isZero() ? 45 : -errSin.div(refSin.abs()).ln().div(new D(10).ln()).toNumber();
+    const okSin = rSin.verdict === 'ok' && trueSin >= 24 && C.hasInteriorDivergence(fSin, '0', 'pi') === false;
+    console.log(`  [${okSin ? 'PASS' : 'FAIL'}] ln(1-sin(x)) [0,pi]: verdict=${rSin.verdict}, true=${trueSin.toFixed(1)}`);
+    check(okSin, '4.5 ln(1-sin(x)) [0,pi] failed');
+  }
+
+  // 真发散守卫对照（必须全部判定 divergent）
+  const divGuardrails = [
+    ['tan(x)/x [0,inf)', 'tan(x)/x', '0', 'inf'],
+    ['sin(x)/(x*(1-sin(x))) [0,inf)', 'sin(x)/(x*(1-sin(x)))', '0', 'inf'],
+    ['sin(x)/(x*sqrt(1-sin(x))) [0,inf)', 'sin(x)/(x*sqrt(1-sin(x)))', '0', 'inf'],
+    ['1/(1-sin(x)) [0,pi]', '1/(1-sin(x))', '0', 'pi'],
+    ['1/sqrt(1-sin(x)) [0,pi]', '1/sqrt(1-sin(x))', '0', 'pi'],
+    ['(ln((1+sin)/(1-sin)))^2/x [0,inf)', 'ln((1+sin(x))/(1-sin(x)))^2/x', '0', 'inf'],
+    ['ln(((1+sin)/(1-sin))^2) [0,inf)', 'ln(((1+sin(x))/(1-sin(x)))^2)', '0', 'inf'],
+    ['exp(1/x) [0,1]', 'exp(1/x)', '0', '1']
+  ];
+  for (const [name, fn, a, b] of divGuardrails) {
+    const rDiv = C.integrate(C.compile(fn), a, b);
+    const ok = rDiv.verdict === 'divergent';
+    console.log(`  [${ok ? 'PASS' : 'FAIL'}] 发散守卫 ${name}: verdict=${rDiv.verdict} (${rDiv.method})`);
+    check(ok, `4.5 divergent guardrail failed on ${name}: got ${rDiv.verdict}`);
+  }
+}
+
+console.log('\n[4.6] 免括号简写输入法与全链路回归检查...');
+{
+  require(path.join(ROOT, 'integral-symbolic.js'));
+  const HP = globalThis.IntegralHP;
+  const Sym = globalThis.IntegralSymbolic;
+
+  const normCases = [
+    ['sinx', 'sin(x)'],
+    ['sinsinx', 'sin(sin(x))'],
+    ['sin2^x', 'sin(2^x)'],
+    ['sin(2)^x', 'sin(2)^x'],
+    ['(sinx)^2', 'sin(x)^2'],
+    ['sin(x)^2', 'sin(x)^2'],
+    ['sinx^2', 'sin(x^2)'],
+    ['sin2x', 'sin(2*x)'],
+    ['sin2x^2', 'sin(2*x^2)'],
+    ['sin2pix', 'sin(2*pi*x)'],
+    ['sinxcosx', 'sin(x)*cos(x)'],
+    ['xsinx', 'x*sin(x)'],
+    ['exp-x^2', 'exp(-(x^2))'],
+    ['sin0.5x', 'sin(0.5*x)'],
+    ['sin1e-2x', 'sin(1e-2*x)'],
+    ['ln2x', 'ln(2*x)'],
+    ['xln2', 'x*ln(2)'],
+    ['ln(((1+sinx)/(1-sinx))^2)/x', 'ln(((1+sin(x))/(1-sin(x)))^2)/x'],
+    ['abssinx/(e^x+abs(sinx+cosx))', 'abs(sin(x))/(e^x+abs(sin(x)+cos(x)))']
+  ];
+  for (const [raw, expected] of normCases) {
+    const got = C.normalizeExpr(raw);
+    const fCore = C.compile(raw);
+    const fHp = HP.compile(raw);
+    const fSplit = HP.compileSplit(raw);
+    const x0 = 0.65;
+    const vCore = fCore(x0);
+    const vHp = Number(fHp(new D(String(x0))).toString());
+    const sp = fSplit(new D(String(x0)), new D(0));
+    const vSp = Number(sp.b.plus(sp.d).toString());
+    const ok = got === expected && fCore.src === expected &&
+      Math.abs(vCore - vHp) <= 1e-12 && Math.abs(vCore - vSp) <= 1e-12;
+    console.log(`  [${ok ? 'PASS' : 'FAIL'}] norm ${raw} -> ${got}`);
+    check(ok, `4.6 norm/eval mismatch on ${raw}: got=${got}, expected=${expected}`);
+  }
+
+  const badCases = ['x2', 'e2', 'pi2', 'max x', 'sin', 'sin y', 'secx'];
+  for (const raw of badCases) {
+    let threwCore = false, threwHp = false;
+    try { C.compile(raw); } catch (e) { threwCore = true; }
+    try { HP.compile(raw); } catch (e) { threwHp = true; }
+    const ok = threwCore && threwHp;
+    console.log(`  [${ok ? 'PASS' : 'FAIL'}] 拒绝非法简写 ${raw}`);
+    check(ok, `4.6 should reject invalid shorthand ${raw}`);
+  }
+
+  // 端到端积分 + 闭式对照 + 结构剖析 + 符号预处理 + 缩写上下限
+  const rGauss = C.integrate(C.compile('exp-x^2'), '-inf', 'inf', { targetDigits: 25 });
+  const rLogOsc = C.integrate(C.compile('ln(((1+sinx)/(1-sinx))^2)/x'), '0', 'inf', { targetDigits: 25 });
+  const rBound = C.integrate(C.compile('sinx'), '0', 'sqrt2', { targetDigits: 18 });
+  const pGauss = glue.analyzeIntegralProfile('exp-x^2', '-inf', 'inf');
+  const pOsc = glue.analyzeIntegralProfile('ln(1-cosx)', '0', 'pi');
+  const symF = Sym._normalizeForEngine('sin2^x+exp-x^2+ln2');
+  const symB = Sym._boundToEngine('sqrt2');
+  const e2eOk = rGauss.verdict === 'ok' && Math.abs(rGauss.value - Math.sqrt(Math.PI)) < 1e-12 &&
+    rLogOsc.verdict === 'ok' && Math.abs(rLogOsc.value - Math.PI * Math.PI) < 1e-10 &&
+    rBound.verdict === 'ok' && Math.abs(rBound.value - (1 - Math.cos(Math.SQRT2))) < 1e-12 &&
+    pGauss.hasExp === true && pOsc.hasNestedLog === true &&
+    symF === 'sin(2^x)+exp(-(x^2))+(log(2))' && symB === 'sqrt(2)';
+  console.log(`  [${e2eOk ? 'PASS' : 'FAIL'}] 简写全链路积分/画像/符号预处理/边界`);
+  check(e2eOk, '4.6 end-to-end shorthand integration/profile/symbolic failed');
+}
+
 console.log('\n================================================');
 if (failures === 0) {
   console.log('ALL FOUR PILLARS PASSED ZERO FAILURES.');
